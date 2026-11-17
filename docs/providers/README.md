@@ -40,6 +40,7 @@ all. That's what the pages here record.
 
 | Provider | Kind | Desktop | iOS | Sleeps when idle |
 | --- | --- | --- | --- | --- |
+| [Cubicle](cubicle.md) | Persistent Linux Boxes and per-task sandboxes | Create and connect in Ateam | Separate phone access setup | Manual stop and start |
 | [Hetzner](hetzner.md) | VPS — Ateam can create one for you in-app | ✅ | ✅ | no: a powered-off server still bills |
 | [boxd](boxd.md) | persistent KVM microVMs, driven by their CLI | ✅ via boxd's SSH proxy | ✅ Set up phone access, or `--tailscale` ([how](boxd.md#ios)) | ✅ and the phone wakes it ([how](boxd.md#sleep-and-wake)) |
 | [Sprites](sprites.md) | persistent hardware-isolated microVMs on Fly.io | ✅ via sshd and `sprite proxy` | ✅ Set up phone access, or `--tailscale` ([how](sprites.md#ios)) | ✅ and the phone wakes it; a loop keeps it awake ([how](sprites.md#sleeping)) |
@@ -54,12 +55,8 @@ phone over Tailscale and keeps an agent running across a memory snapshot. But st
 needs experimental snapshot APIs, an ssh helper and a cold restart every week, and its CPU
 costs about 3.7 times Sprites'.
 
-> **Not the same as "Create a box" in the app.** The desktop can *provision* a VPS
-> for you (currently Hetzner) via the `BoxProvider` interface in
-> `packages/server/src/provision.ts`. That's a code integration holding your API
-> token, and it's maintained in-tree rather than contributed — each one is a live
-> API client whose breakage looks like an Ateam bug. This directory is for the
-> other kind: services you drive with their own CLI, which need no code from us.
+The desktop can provision Hetzner and Cubicle Boxes from **Create a box**.
+The other providers in this table have their own provisioning steps.
 
 ## Sleep and wake
 

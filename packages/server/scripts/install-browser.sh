@@ -39,6 +39,9 @@ TASKWINDOW_EXTENSION_ID="adbfpkbjndcpjihceobeegkokblgifpe"
 TASKWINDOW_PORT=9377
 CDP_PORT=9222
 DISPLAY_NUM=":99"
+# A taller canvas fits beside Ateam's docked terminal.
+DISPLAY_WIDTH=1280
+DISPLAY_HEIGHT=960
 DATA_DIR="${ATEAM_DATA_DIR:-$HOME/.ateam}"
 BROWSER_DIR="$DATA_DIR/browser"
 PROFILE_DIR="$BROWSER_DIR/profile"
@@ -50,6 +53,15 @@ BIN_DIR="$HOME/.local/bin"
 CHROME_LAUNCHER="$BIN_DIR/ateam-chrome"
 XVFB_LAUNCHER="$BIN_DIR/ateam-xvfb"
 SERVICES="ateam-xvfb ateam-openbox ateam-chrome ateam-x11vnc ateam-novnc ateam-taskwindow"
+# Cubicle's desktop image already ships Xfce. Give the Ateam display its own
+# desktop surface and D-Bus session, with its own wallpaper and icons.
+DESKTOP_SURFACE=""
+DESKTOP_LAUNCHER="$BIN_DIR/ateam-desktop"
+if [ "${ATEAM_BOX_DESKTOP:-}" = 1 ] &&
+	[ -x /usr/bin/xfdesktop ] && [ -x /usr/bin/dbus-run-session ]; then
+	DESKTOP_SURFACE=1
+	SERVICES="$SERVICES ateam-desktop-surface"
+fi
 
 SPRITE_ENV="$(command -v sprite-env 2>/dev/null || true)"
 if [ -z "$SPRITE_ENV" ] && [ -x /.sprite/bin/sprite-env ]; then SPRITE_ENV=/.sprite/bin/sprite-env; fi
@@ -132,6 +144,22 @@ fi
 
 mkdir -p "$BROWSER_DIR" "$PROFILE_DIR" "$BIN_DIR"
 chmod 700 "$BROWSER_DIR"
+if [ -n "$DESKTOP_SURFACE" ]; then
+	cat >"$DESKTOP_LAUNCHER" <<'EOF'
+#!/bin/sh
+wallpaper=/usr/local/share/ateam/cubicle-wallpaper.jpg
+if [ -r "$wallpaper" ] && command -v xfconf-query >/dev/null; then
+	property=/backdrop/screen0/monitorscreen/workspace0/last-image
+	current=$(xfconf-query -c xfce4-desktop -p "$property" 2>/dev/null) || current=""
+	case "$current" in
+		"" | /usr/share/backgrounds/xfce/xfce-shapes.svg)
+			xfconf-query -c xfce4-desktop -p "$property" -n -t string -s "$wallpaper" ;;
+	esac
+fi
+exec /usr/bin/xfdesktop
+EOF
+	chmod +x "$DESKTOP_LAUNCHER"
+fi
 if [ ! -s "$VNC_PASS_FILE" ]; then
 	# VNC passwords stop at 8 characters, so more would only look stronger.
 	(umask 077 && head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 8 >"$VNC_PASS_FILE")
@@ -159,7 +187,7 @@ sed -i 's/"exit_type":"Crashed"/"exit_type":"Normal"/' "\$P/Default/Preferences"
 rm -f "\$P"/Singleton*
 exec /usr/bin/google-chrome --no-sandbox --disable-gpu --remote-debugging-port=$CDP_PORT \\
 	--user-data-dir="\$P" --no-first-run --disable-session-crashed-bubble --lang=en-US \\
-	--start-maximized --window-size=1280,720 --no-startup-window
+	--start-maximized --window-size=$DISPLAY_WIDTH,$DISPLAY_HEIGHT --no-startup-window
 EOF
 chmod +x "$CHROME_LAUNCHER"
 # A running Chrome keeps the flags it started with, and step 4 leaves it running.
@@ -170,6 +198,11 @@ if [ -n "$OLD_LAUNCHER" ] && [ "$OLD_LAUNCHER" != "$(cat "$CHROME_LAUNCHER")" ];
 # /tmp across a restart, so one stale lock left every restart failing. The lock is
 # cleared only when the pid in it isn't a running Xvfb.
 D="${DISPLAY_NUM#:}"
+DISPLAY_STALE=""
+if [ -f "$XVFB_LAUNCHER" ] &&
+	! grep -Fq " -screen 0 ${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}x24 " "$XVFB_LAUNCHER"; then
+	DISPLAY_STALE=1
+fi
 cat >"$XVFB_LAUNCHER" <<EOF
 #!/bin/bash
 # Written by Ateam's install-browser.sh: the virtual display Chrome runs on.
@@ -178,7 +211,7 @@ pid="\$(tr -d ' ' 2>/dev/null <"\$L")"
 if [ -n "\$pid" ] && [ "\$(cat /proc/\$pid/comm 2>/dev/null)" != Xvfb ]; then
 	rm -f "\$L" /tmp/.X11-unix/X$D
 fi
-exec /usr/bin/Xvfb $DISPLAY_NUM -screen 0 1280x720x24 -nolisten tcp
+exec /usr/bin/Xvfb $DISPLAY_NUM -screen 0 ${DISPLAY_WIDTH}x${DISPLAY_HEIGHT}x24 -nolisten tcp
 EOF
 chmod +x "$XVFB_LAUNCHER"
 
@@ -218,6 +251,9 @@ if [ -n "$VIEW_ADDR" ]; then SERVICES="$SERVICES ateam-novnc-tailnet"; fi
 service_specs() {
 	echo "ateam-xvfb|||$XVFB_LAUNCHER|"
 	echo "ateam-openbox|ateam-xvfb|DISPLAY=$DISPLAY_NUM|/usr/bin/openbox|"
+	if [ -n "$DESKTOP_SURFACE" ]; then
+		echo "ateam-desktop-surface|ateam-openbox|DISPLAY=$DISPLAY_NUM|/usr/bin/dbus-run-session|--,$DESKTOP_LAUNCHER"
+	fi
 	echo "ateam-chrome|ateam-xvfb,ateam-openbox|DISPLAY=$DISPLAY_NUM|$CHROME_LAUNCHER|"
 	echo "ateam-x11vnc|ateam-xvfb|DISPLAY=$DISPLAY_NUM|/usr/bin/x11vnc|-display,$DISPLAY_NUM,-localhost,-forever,-shared,-quiet,-rfbauth,$VNC_AUTH_FILE"
 	echo "ateam-novnc|ateam-x11vnc||/usr/bin/websockify|--web,/usr/share/novnc,$LOOPBACK_VIEW_ADDR,127.0.0.1:5900"
@@ -261,6 +297,7 @@ if [ "$SVC_MGR" = systemd ]; then
 	# running one would keep listening where an older run put it.
 	# shellcheck disable=SC2086
 	sudo systemctl enable --now $(printf '%s.service ' $SERVICES) >/dev/null 2>&1
+	if [ -n "$DESKTOP_SURFACE" ]; then sudo systemctl restart ateam-desktop-surface.service; fi
 	sudo systemctl restart ateam-novnc.service
 	if [ -n "$VIEW_ADDR" ]; then sudo systemctl restart ateam-novnc-tailnet.service; fi
 	if [ -n "${TW_UPGRADED:-}" ]; then sudo systemctl restart ateam-taskwindow.service; fi
@@ -313,7 +350,9 @@ else
 	done < <(service_specs)
 	if [ -n "${TW_UPGRADED:-}" ]; then "$SPRITE_ENV" services restart ateam-taskwindow >/dev/null; fi
 fi
-if [ -n "$CHROME_STALE" ]; then
+if [ -n "$DISPLAY_STALE" ]; then
+	info "The running Box desktop keeps its size until the display services restart."
+elif [ -n "$CHROME_STALE" ]; then
 	if [ "$SVC_MGR" = systemd ]; then
 		RESTART="sudo systemctl restart ateam-chrome"
 	else

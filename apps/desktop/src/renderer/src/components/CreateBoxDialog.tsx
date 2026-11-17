@@ -1,8 +1,10 @@
-import { X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
 import type { AgentDTO } from "@ateam/protocol";
+import { X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ProviderOptions } from "../../../shared/host";
 import { stripAnsi } from "../lib/ansi";
+import { CubicleCreateForm } from "./CubicleCreateForm";
+import { CubicleLogo } from "./CubicleLogo";
 import { HetznerLogo } from "./HetznerLogo";
 
 // "Create a box": Ateam stands up a fresh VPS at a provider, generates the SSH key,
@@ -20,6 +22,8 @@ export function CreateBoxDialog({
 	onDone: (alias: string) => void;
 	onClose: () => void;
 }) {
+	const [provider, setProvider] = useState("cubicle");
+	const [cubicleBusy, setCubicleBusy] = useState(false);
 	const [name, setName] = useState("");
 	const [token, setToken] = useState("");
 	const [tsKey, setTsKey] = useState("");
@@ -38,11 +42,11 @@ export function CreateBoxDialog({
 	const [preinstall, setPreinstall] = useState<string[]>([]);
 	const logRef = useRef<HTMLPreElement>(null);
 
-	const loadOptions = async () => {
+	const loadOptions = useCallback(async (apiToken?: string) => {
 		setLoadingOpts(true);
 		setOptsError(null);
 		try {
-			const o = await window.ateamHost.providerOptions(token.trim() || undefined);
+			const o = await window.ateamHost.providerOptions(apiToken);
 			setOptions(o);
 			setRegion((r) => r || o.locations[0]?.slug || "");
 		} catch (e) {
@@ -50,7 +54,7 @@ export function CreateBoxDialog({
 		} finally {
 			setLoadingOpts(false);
 		}
-	};
+	}, []);
 
 	useEffect(() => {
 		void window.ateamHost.secretsStatus().then((s) => {
@@ -59,24 +63,28 @@ export function CreateBoxDialog({
 			if (s.hetznerToken) void loadOptions();
 		});
 		void window.ateam.agents.list().then(setAgents);
-		// biome-ignore lint/correctness/useExhaustiveDependencies: run once on open
-	}, []);
+	}, [loadOptions]);
 	useEffect(() => {
-		if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+		if (log && logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
 	}, [log]);
 
 	// Only sizes actually available in the chosen region (empty `locations` = unknown → offer it).
-	const availableSizes = options
-		? options.serverTypes.filter((st) => st.locations.length === 0 || st.locations.includes(region))
-		: [];
+	const availableSizes = useMemo(
+		() =>
+			options
+				? options.serverTypes.filter(
+						(st) => st.locations.length === 0 || st.locations.includes(region),
+					)
+				: [],
+		[options, region],
+	);
 	// Keep the chosen size valid as the region changes, starting from the smallest with
 	// 4 GB: agents need about a gigabyte each, and the smallest Hetzner sells has one.
 	useEffect(() => {
 		if (availableSizes.length > 0 && !availableSizes.some((s) => s.slug === size)) {
 			setSize((availableSizes.find((s) => s.memory >= 4) ?? availableSizes[0])?.slug ?? "");
 		}
-		// biome-ignore lint/correctness/useExhaustiveDependencies: react to region/options only
-	}, [region, options]);
+	}, [availableSizes, size]);
 
 	const run = async () => {
 		if (!name.trim()) {
@@ -118,18 +126,36 @@ export function CreateBoxDialog({
 	return (
 		// A click beside the dialog while it works would only hide the progress: the box
 		// is still being made, and lands on its page when it's done.
-		<div className="overlay" onMouseDown={() => !busy && onClose()}>
-			<div className="dialog createbox" onMouseDown={(e) => e.stopPropagation()}>
+		<div className="overlay">
+			<div className="dialog createbox">
 				<div className="cb-head">
-					<HetznerLogo size={17} />
+					{provider === "hetzner" ? <HetznerLogo size={17} /> : <CubicleLogo size={17} />}
 					<span className="cb-title">Create a box</span>
-					<span className="cb-sub">Hetzner Cloud</span>
-					<button type="button" className="navbtn cb-x" onClick={onClose} aria-label="Close">
+					<select
+						aria-label="Provider"
+						style={{ width: "auto", marginLeft: "auto" }}
+						className="cb-input"
+						value={provider}
+						disabled={busy || cubicleBusy}
+						onChange={(e) => setProvider(e.target.value)}
+					>
+						<option value="cubicle">Cubicle</option>
+						<option value="hetzner">Hetzner Cloud</option>
+					</select>
+					<button
+						type="button"
+						className="navbtn cb-x"
+						disabled={busy || cubicleBusy}
+						onClick={onClose}
+						aria-label="Close"
+					>
 						<X size={15} strokeWidth={1.75} />
 					</button>
 				</div>
 
-				{started ? (
+				{provider === "cubicle" ? (
+					<CubicleCreateForm onDone={onDone} onBusy={setCubicleBusy} />
+				) : started ? (
 					<div className="cb-progress">
 						<ul className="cb-stages">
 							{stages.map((s, i) => (
@@ -309,7 +335,7 @@ export function CreateBoxDialog({
 									type="button"
 									className="cb-create"
 									disabled={loadingOpts || (!token.trim() && !saved.hetznerToken)}
-									onClick={() => void loadOptions()}
+									onClick={() => void loadOptions(token.trim() || undefined)}
 								>
 									{loadingOpts ? "Loading…" : "Load regions & sizes"}
 								</button>

@@ -19,7 +19,7 @@ npmRebuild: false
 # newest GitHub release (public repo — no token needed at runtime).
 publish:
   provider: github
-  owner: clawnify
+  owner: cubicle-hq
   repo: ateam
 mac:
   # node-pty ships prebuilds for every platform/arch, but only ever loads the one

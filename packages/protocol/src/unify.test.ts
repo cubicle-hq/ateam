@@ -43,13 +43,27 @@ test("owner/name casing doesn't split a repo across engines", () => {
 	expect(cards[0]?.members.map((m) => m.alias)).toEqual([null, "hetzner"]);
 });
 
-test("non-GitHub repos never merge — each stays its own card", () => {
+test("unlinked projects with the same name stay separate", () => {
 	const a = project("pA", { name: "scratch" });
 	const b = project("pB", { name: "scratch" }); // same name, no gh identity
 	const cards = unifyProjects([a, b], { pA: null, pB: "hetzner" });
 
 	expect(cards).toHaveLength(2);
 	expect(cards.every((c) => c.members.length === 1)).toBe(true);
+});
+
+test("a Cubicle copy uses its Mac project's card and retains its own routing ID", () => {
+	const local = project("mac");
+	const copy = project("copy", { sourceProjectId: local.id });
+	const origins = { mac: null, copy: "cb-demo" };
+	const [joined] = unifyProjects([copy, local], origins);
+	expect(joined?.key).toBe("engine:local:mac");
+	expect(joined?.name).toBe("mac");
+	expect(joined?.members.map((m) => [m.alias, m.projectId])).toEqual([
+		[null, "mac"],
+		["cb-demo", "copy"],
+	]);
+	expect(unifyProjects([copy], origins)[0]?.key).toBe("engine:cb-demo:copy");
 });
 
 test("a projectId missing from origins defaults to local", () => {

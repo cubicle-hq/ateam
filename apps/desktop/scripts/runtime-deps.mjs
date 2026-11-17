@@ -20,6 +20,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { builtinModules, createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
 const DESKTOP_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 const BUILTINS = new Set(builtinModules);
@@ -42,7 +43,21 @@ function externalPackages(outDir) {
 		if (!existsSync(dir)) continue;
 		for (const file of readdirSync(dir).filter((f) => f.endsWith(".js"))) {
 			const code = readFileSync(join(dir, file), "utf8");
-			const specs = [...code.matchAll(/require\(\s*["']([^"']+)["']\s*\)/g)];
+			const source = ts.createSourceFile(file, code, ts.ScriptTarget.Latest);
+			const specs = [];
+			const visit = (node) => {
+				if (
+					ts.isCallExpression(node) &&
+					ts.isIdentifier(node.expression) &&
+					node.expression.text === "require" &&
+					node.arguments.length === 1 &&
+					ts.isStringLiteral(node.arguments[0])
+				) {
+					specs.push(node.arguments[0].text);
+				}
+				ts.forEachChild(node, visit);
+			};
+			visit(source);
 			if (specs.length === 0) {
 				console.error(
 					`FATAL: ${sub}/${file} contains no require() — the bundle is no ` +
@@ -50,7 +65,7 @@ function externalPackages(outDir) {
 				);
 				process.exit(1);
 			}
-			for (const [, spec] of specs) {
+			for (const spec of specs) {
 				if (spec.startsWith(".") || spec.startsWith("/")) continue;
 				if (spec.startsWith("node:")) continue;
 				// "@scope/name/deep" → "@scope/name"; "pkg/deep" → "pkg"

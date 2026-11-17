@@ -420,6 +420,8 @@ export type MergeStatus = "queued" | "updating" | "merging" | "conflict";
 
 export interface ProjectDTO {
 	id: string;
+	/** Mac project that this desktop copied into a Cubicle Box. */
+	sourceProjectId?: string;
 	repoPath: string;
 	name: string;
 	defaultBranch: string | null;

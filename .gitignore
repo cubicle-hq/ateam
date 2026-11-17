@@ -11,3 +11,9 @@ release/
 .env.local
 coverage/
 *.tsbuildinfo
+/scripts/__pycache__/
+
+# Keep portable sandbox setup while ignoring local worktree state.
+!.ateam/
+.ateam/*
+!.ateam/sandbox.json

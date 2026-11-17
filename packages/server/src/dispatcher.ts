@@ -828,8 +828,8 @@ export function createDispatcher(engine: Engine): Dispatcher {
 			requireTask(services, taskId);
 			return openBrowserView(services.userDataDir);
 		},
-		// Consent-gated like editor:install: clients call this only after the user
-		// said yes to BROWSER_NOT_INSTALLED_ERROR. Minutes long (apt, Chrome).
+		// Clients request setup when opening a missing Box desktop. The install
+		// can take several minutes while apt installs Chrome and the desktop.
 		[CH.browserInstall]: async (taskId: string) => {
 			requireTask(services, taskId);
 			await installBrowser(services.userDataDir);

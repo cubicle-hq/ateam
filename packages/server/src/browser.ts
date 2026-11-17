@@ -2,7 +2,7 @@
 // password to its desktop. The browser itself is installed by
 // scripts/install-browser.sh and runs as services that outlive the engine (noVNC
 // on loopback, plus the tailnet when the box has one), so there is nothing here
-// to start, only to find, or to install once the user said yes.
+// to start, only to find or install at the client’s request.
 import { spawn } from "node:child_process";
 import { closeSync, openSync, readFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
@@ -31,11 +31,9 @@ export function readVncPassword(dataDir: string): string | null {
 let installing: Promise<void> | null = null;
 
 /**
- * Run install-browser.sh on THIS machine. Consent lives with the caller: engines
- * only run this after a client relayed the user's yes. The script never prompts
- * (without passwordless sudo it stops and says so), so it runs fine with no
- * terminal. Its output goes to browser-install.log in `dataDir`. `cmd` is
- * injectable for tests.
+ * Install the Box desktop at the client's request. The script reports missing
+ * passwordless sudo and can run without a terminal. Its output goes to
+ * browser-install.log in `dataDir`. `cmd` is injectable for tests.
  */
 export function installBrowser(dataDir: string, cmd = INSTALL_BROWSER_CMD): Promise<void> {
 	installing ??= runInstall(dataDir, cmd).finally(() => {

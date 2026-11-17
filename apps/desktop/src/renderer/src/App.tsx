@@ -7,7 +7,6 @@ import type {
 	KanbanColumn,
 	LoopDTO,
 	ProjectDTO,
-	RepoAccess,
 	SessionDTO,
 	SessionHitDTO,
 	TaskDTO,
@@ -56,6 +55,7 @@ import {
 	LayoutPanelLeft,
 	Maximize2,
 	Minimize2,
+	Monitor,
 	PanelLeft,
 	PanelRight,
 	Play,
@@ -84,14 +84,16 @@ import {
 	useRef,
 	useState,
 } from "react";
+import { CUBICLE_SETUP_STEPS, type CubicleSetupStep, NEW_CUBICLE_SANDBOX } from "../../shared/host";
 import { SessionGlyphs, SessionIcon } from "./components/AgentIcon";
 import { ChangesPane } from "./components/ChangeSteps";
 import { ChangesList, DiffStat } from "./components/Changes";
 import { CleanupDialog } from "./components/CleanupDialog";
 import { ConnectSteps } from "./components/ConnectSteps";
+import { CubicleBoxMenu } from "./components/CubicleBoxMenu";
+import { CubiclePreviewPane } from "./components/CubiclePreviewPane";
 import { FileDiffView } from "./components/FileDiffView";
 import { GetStarted } from "./components/GetStarted";
-import { GithubAccess } from "./components/GithubAccess";
 import { GithubIssueCard, GithubIssuePanel, NewIssueDialog } from "./components/GithubIssues";
 import { IconButton } from "./components/IconButton";
 import { LeadChat, type LeadProposalItem } from "./components/LeadChat";
@@ -105,6 +107,8 @@ import { ProposalNote, ProposalStrip, proposalLabel } from "./components/Proposa
 import { QuestionCard } from "./components/QuestionCard";
 import { RailTile } from "./components/RailTile";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { SetupStepper } from "./components/SetupStepper";
+import { isCubicleAlias, projectBoxDestinations } from "./lib/project-boxes";
 import { SidebarViewMenu } from "./components/SidebarViewMenu";
 import { TaskPeek, TaskPeekProvider } from "./components/TaskPeek";
 import { TaskSearch } from "./components/TaskSearch";
@@ -114,7 +118,6 @@ import { Dialog, DialogContent, DialogTitle } from "./components/ui/dialog";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { usePrompt } from "./components/usePrompt";
 import { VscodeLogo } from "./components/VscodeLogo";
-import { addTailscaleBox, installBox } from "./lib/box-actions";
 import {
 	bestMcShape,
 	MC_PAGE_SIZE,
@@ -258,6 +261,7 @@ const FOCUS_COLLAPSE_LABEL: Record<View, string> = {
 
 /** A task as the New Task composer asks for it. */
 interface ComposeInput {
+	resumeBox?: string;
 	name: string;
 	nameAuto: boolean;
 	prompt: string;
@@ -282,18 +286,13 @@ export function App() {
 	// projectId/taskId → owning engine alias (null = local). Learned by the main-process
 	// aggregate from every engine's reads; drives unification + per-task origin badges.
 	const [origins, setOrigins] = useState<Record<string, Alias>>({});
-	// The ~/.ssh/config boxes a task can be sent to run on (the composer's "Run on"
-	// list). Connecting + cloning the repo onto one happens at task-create time.
+	// Connection status for the project’s task destinations and existing tasks.
 	const [connections, setConnections] = useState<ConnectionDTO[]>([]);
 	// alias → why the box didn't come up when the app connected to it by itself.
 	const [connFailures, setConnFailures] = useState<Record<string, string>>({});
 	// alias → the wire contract the held engine actually speaks. A box on a different
 	// one is held anyway now, so this is what tells the user which box is skewed.
 	const [envProtocol, setEnvProtocol] = useState<Record<string, number>>({});
-	// Whether this build can upgrade a box at all. False in dev, where an update
-	// would install the latest RELEASE and leave a box running main's protocol
-	// still behind — a minute of work that changes nothing.
-	const [canUpdateBoxes, setCanUpdateBoxes] = useState(false);
 	// Which agents each connected engine actually has installed (its system:hello
 	// agents), keyed by alias ("local" for this Mac). Drives per-environment agent
 	// availability in the composer — you can only pick an agent the box really has.
@@ -304,9 +303,6 @@ export function App() {
 	// the board but isn't in here is served from its last-seen board
 	// (main/offline.ts): its cards show, its engine can't be reached.
 	const [heldAliases, setHeldAliases] = useState<Set<string> | null>(null);
-	// The active repo's `origin` remote URL (null = local-only). A task can go remote
-	// only if there's a remote to clone the project from onto the box.
-	const [activeRepoRemote, setActiveRepoRemote] = useState<string | null>(null);
 	const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
 	// Every project at once: the sidebar, the board, Mission Control and the
 	// Loops tab list all of them. activeProjectId stays the project new work
@@ -457,16 +453,6 @@ export function App() {
 	// like from here, so the archived count on Clean up follows the sweep.
 	const [archivedTick, setArchivedTick] = useState(0);
 	const [composerOpen, setComposerOpen] = useState(false);
-	// A composer reopened with a task that didn't start, filled in as it was asked.
-	const [composerSeed, setComposerSeed] = useState<ComposeInput | null>(null);
-	// A Run on a box that stopped because the box's GitHub access can't see the repo:
-	// which box and repo, and the task as asked, so Try again loses nothing typed.
-	const [githubFix, setGithubFix] = useState<{
-		alias: string;
-		label: string;
-		repo: string;
-		input: ComposeInput;
-	} | null>(null);
 	// A task or loop a task's agent proposed, open in its dialog. Closing the
 	// dialog keeps the proposal (the task panel's strip opens it again); only
 	// creating it or Dismiss clears it.
@@ -552,7 +538,16 @@ export function App() {
 		// projects.list() merges every connected engine's projects (main/aggregate.ts);
 		// origins() then reports which engine owns each, learned during that same read.
 		const list = await window.ateam.projects.list();
-		const scoped = boundProjectId ? list.filter((p) => p.id === boundProjectId) : list;
+		const bound = list.find((project) => project.id === boundProjectId);
+		const sourceId = bound?.sourceProjectId ?? boundProjectId;
+		const scoped = boundProjectId
+			? list.filter(
+					(project) =>
+						project.id === boundProjectId ||
+						project.id === sourceId ||
+						project.sourceProjectId === sourceId,
+				)
+			: list;
 		setProjects(scoped);
 		setOrigins(await window.ateamHost.origins());
 		setActiveProjectId((cur) => {
@@ -642,13 +637,11 @@ export function App() {
 		});
 	}, [loadProjects, refreshLoops]);
 
-	// The ~/.ssh/config box list for the composer's "Run on" picker + each connected
-	// engine's installed agents, kept fresh as boxes connect/disconnect.
+	// Refresh connection status and installed agents as boxes connect or disconnect.
 	useEffect(() => {
 		const load = () => {
 			void window.ateamHost.list().then(setConnections);
 			void window.ateamHost.failures().then(setConnFailures);
-			void window.ateamHost.canUpdateBoxes().then(setCanUpdateBoxes);
 			void window.ateamHost.connected().then((list) => {
 				const map: Record<string, string[]> = {};
 				const wire: Record<string, number> = {};
@@ -677,6 +670,11 @@ export function App() {
 	);
 	// The box a task is being set up on, so the toast can show its steps.
 	const [provisioning, setProvisioning] = useState<string | null>(null);
+	const [sandboxSetup, setSandboxSetup] = useState<{
+		id: string;
+		step: CubicleSetupStep;
+		detail: string;
+	} | null>(null);
 
 	// Load every project's tasks, not only the selected one's, so the Lead chat
 	// can name and open any of them; evtTaskUpdated keeps them fresh after.
@@ -812,34 +810,6 @@ export function App() {
 		if (alias) void wakeBox(alias);
 	};
 
-	// "Run on" options for a new task: this Mac (if the repo is here) + every
-	// ~/.ssh/config box. A box clones the project from its git remote, so boxes are
-	// disabled for a repo with no remote (nothing to clone).
-	const activeRepoProjectId =
-		activeCard?.members.find((m) => m.alias === null)?.projectId ??
-		activeCard?.members[0]?.projectId ??
-		null;
-	// Fetch the active repo's remote from its owning engine whenever the card changes.
-	// Cleared first: the composer's Project pill can change the card while it is
-	// open, and a box set up in that gap must not clone the last repo's remote.
-	useEffect(() => {
-		setActiveRepoRemote(null);
-		if (!activeRepoProjectId) return;
-		let cancelled = false;
-		void window.ateam.projects.remoteUrl(activeRepoProjectId).then((url) => {
-			if (!cancelled) setActiveRepoRemote(url);
-		});
-		return () => {
-			cancelled = true;
-		};
-	}, [activeRepoProjectId]);
-	// Remove a box from the "Run on" list. The main process disconnects it if held
-	// and forgets the saved record (an ssh_config alias is flagged hidden — the
-	// config file itself is never touched); the connections-changed broadcast then
-	// refreshes the list here. Setting the box up again brings it back.
-	const forgetBox = useCallback(async (alias: string) => {
-		await window.ateamHost.forget(alias);
-	}, []);
 	// Install a coding agent's CLI on whichever machine the chosen environment is:
 	// this Mac or a box, one path for both. Routed by that engine's projectId —
 	// the same key that lands a task there (unify.ts) — because the engine doing
@@ -864,54 +834,37 @@ export function App() {
 		},
 		[activeMembers],
 	);
-	const canRemote = activeRepoRemote !== null;
-	const hasLocalMember = activeMembers.some((m) => m.alias === null);
-	const composerEnvs = useMemo(() => {
-		// A box is runnable if it ALREADY has this repo (a member — no clone needed) or
-		// the repo has a remote we could clone onto it.
-		const memberAliases = new Set(activeMembers.map((m) => m.alias));
-		return [
-			{ alias: null as Alias, label: "Local", disabled: !hasLocalMember },
-			...connections.map((c) => ({
-				alias: c.alias,
-				// A box a provider wakes goes by its machine name there, as on the phone;
-				// its address moves to the row's subtitle.
-				label: wakeMachineName(c.wake) ?? c.alias,
-				disabled: !memberAliases.has(c.alias) && !canRemote,
-				transport: c.transport,
-				// `known` is only set by a successful connect, so a config alias we've
-				// never reached is one the engine has probably never been installed on.
-				needsSetup: !c.known,
-				asleep: c.asleep,
-				wake: c.wake ?? null,
-				sleeps: c.sleeps ?? null,
-				// Set only for a connect the app made on its own, where there was no
-				// caller to show the error to — an upgrade that failed reads as an
-				// ordinary offline box without it.
-				error: connFailures[c.alias],
-				// Held, but not on this app's wire contract. Only for a box we actually
-				// hold: an unreachable one has no version to report, and saying nothing
-				// is better than guessing from the last one we saw.
-				skew:
-					envProtocol[c.alias] !== undefined && envProtocol[c.alias] !== PROTOCOL_VERSION
-						? envProtocol[c.alias]
-						: undefined,
-				// Can THIS app update THIS box: a dev build can't update any box, and no
-				// build can update one reachable only over its Tailscale endpoint.
-				updatable: canUpdateBoxes && c.transport !== "ws",
-				needsYou: needingBoxes.has(c.alias),
-			})),
-		];
-	}, [
-		needingBoxes,
-		connections,
-		canRemote,
-		hasLocalMember,
-		activeMembers,
-		connFailures,
-		envProtocol,
-		canUpdateBoxes,
-	]);
+	const hasLocalCheckout = activeMembers.some((m) => m.alias === null);
+	const projectBoxes = projectBoxDestinations(activeMembers, connections);
+	const composerEnvs = [
+		{
+			alias: null as Alias,
+			label: "Local",
+			disabled: !hasLocalCheckout,
+			disabledReason: "Project is not on this Mac",
+		},
+		{
+			alias: NEW_CUBICLE_SANDBOX,
+			label: "New Cubicle sandbox",
+			disabled: !hasLocalCheckout,
+			disabledReason: "Select a project on this Mac",
+		},
+		...projectBoxes.map(({ connection: c, cubicle }) => ({
+			alias: c.alias,
+			label: wakeMachineName(c.wake) ?? c.alias,
+			cubicle,
+			disabled: false,
+			transport: c.transport,
+			asleep: c.asleep,
+			wake: c.wake ?? null,
+			error: connFailures[c.alias],
+			skew:
+				envProtocol[c.alias] !== undefined && envProtocol[c.alias] !== PROTOCOL_VERSION
+					? envProtocol[c.alias]
+					: undefined,
+			needsYou: needingBoxes.has(c.alias),
+		})),
+	];
 
 	// Every loaded task, for the Lead chat to name and open the ones it touches.
 	// A task being deleted is already gone from all of these.
@@ -1657,25 +1610,6 @@ export function App() {
 	// Create the task and launch the chosen agent with the prompt as its first
 	// instruction. `open` lands it on screen (see landTask); otherwise nothing
 	// on screen moves, and a toast and a pulse on its row say where it went.
-	// Before a repo is cloned onto a box: can the box's GitHub access push to it? A box
-	// that can't see the repo fails the clone with a generic error, and one that can
-	// only read it clones fine and fails at the first push, after the agent's work.
-	const boxRepoAccess = async (alias: string, repo: string): Promise<RepoAccess> => {
-		try {
-			// Run on connects (and wakes) the box anyway; the check needs it held.
-			await window.ateamHost.connect(alias, { wake: true });
-			const [verdict] = await window.ateamHost.checkGithub(alias, [repo]);
-			return verdict?.access ?? "unknown";
-		} catch {
-			return "unknown"; // an older box, or no answer: the clone says what's wrong
-		}
-	};
-	// Back to the composer with a task that didn't start, filled in as it was asked.
-	const reopenComposer = (input: ComposeInput) => {
-		setComposerSeed(input);
-		setComposerOpen(true);
-	};
-
 	/** `keepFiles`: files already on the machine the task runs on (attached in
 	 *  the chat of a Lead that lives on that box), which aren't sent again. */
 	const composeTask = (
@@ -1693,7 +1627,6 @@ export function App() {
 			setComposerOpen(false);
 			setComposerIssue(null);
 			setComposerFiles([]);
-			setComposerSeed(null);
 			if (sourceIssue) {
 				const existing = activeTasks.find(
 					(task) => task.issueUrl?.toLowerCase() === sourceIssue.url.toLowerCase(),
@@ -1707,7 +1640,45 @@ export function App() {
 			}
 			// Resolve the engine's project row for this repo on the chosen environment.
 			let projectId: string;
-			if (input.alias === null) {
+			let sandboxTask: TaskDTO | undefined;
+			if (input.alias === NEW_CUBICLE_SANDBOX) {
+				const member = card.members.find((m) => m.alias === null);
+				if (!member) throw new Error("A Cubicle sandbox needs a local repository to copy.");
+				const requestId = crypto.randomUUID();
+				setSandboxSetup({
+					id: requestId,
+					step: "repository",
+					detail: "Preparing the local checkout",
+				});
+				const off = window.ateamHost.onCreateProgress(({ cubicleSetup, stage }) => {
+					if (cubicleSetup?.requestId !== requestId) return;
+					setSandboxSetup((current) =>
+						current?.id === requestId
+							? { id: requestId, step: cubicleSetup.step, detail: stage }
+							: current,
+					);
+				});
+				try {
+					const result = await window.ateamHost.createCubicleTask({
+						requestId,
+						projectId: member.projectId,
+						resumeBox: input.resumeBox,
+						name: input.name,
+						agentId: input.agentId,
+						nameAuto: input.nameAuto,
+						...(sourceIssue
+							? { issue: { number: sourceIssue.number, description: input.prompt } }
+							: {}),
+					});
+					projectId = result.project.id;
+					sandboxTask = result.task;
+					await loadProjects();
+					setActiveProjectId(result.project.id);
+				} finally {
+					off();
+					setSandboxSetup((current) => (current?.id === requestId ? null : current));
+				}
+			} else if (input.alias === null) {
 				const localMember = card.members.find((m) => m.alias === null);
 				if (!localMember) {
 					setError("This repo isn't on your Mac.");
@@ -1715,68 +1686,28 @@ export function App() {
 				}
 				projectId = localMember.projectId;
 			} else {
-				// If the box already has this repo (it's a member of the card, surfaced by
-				// aggregation), use it directly — no clone, no provision. This is the iOS
-				// path: the box already has its repos, you just create tasks against them.
-				const existing = card.members.find((m) => m.alias === input.alias);
-				if (existing) {
-					projectId = existing.projectId;
-					// Its project is on the board from the box's last-seen board: wake
-					// it, and the engine takes over the same ids (host.ts connect).
-					if (!heldAliases?.has(input.alias)) {
-						setInfo(`Waking ${aliasLabel(input.alias)}…`);
-						setProvisioning(input.alias);
-						try {
-							await window.ateamHost.connect(input.alias, { wake: true });
-						} finally {
-							setInfo(null);
-							setProvisioning(null);
-						}
-					}
-				} else {
-					// First task on this box for this repo: it isn't here yet, so clone +
-					// register it from the repo's remote, then route the create to it.
-					if (!activeRepoRemote) {
-						setError("This repo has no git remote to clone onto a box.");
-						return;
-					}
-					const boxLabel = composerEnvs.find((e) => e.alias === input.alias)?.label ?? input.alias;
-					const repoName =
-						card.githubOwner && card.githubName ? `${card.githubOwner}/${card.githubName}` : null;
-					setInfo(`Setting up ${card.name} on ${boxLabel}…`);
+				const existing = projectBoxes.find(({ connection }) => connection.alias === input.alias);
+				if (!existing) {
+					throw new Error("Choose a Box from this project.");
+				}
+				projectId = existing.member.projectId;
+				// A remembered checkout may be asleep. Wake the same engine to use it.
+				if (!heldAliases?.has(input.alias)) {
+					setInfo(`Waking ${aliasLabel(input.alias)}…`);
 					setProvisioning(input.alias);
-					let proj: ProjectDTO;
 					try {
-						const access = repoName ? await boxRepoAccess(input.alias, repoName) : "unknown";
-						if (repoName && access === "none") {
-							setGithubFix({ alias: input.alias, label: boxLabel, repo: repoName, input });
-							return;
-						}
-						if (
-							repoName &&
-							access === "read" &&
-							!(await confirm(
-								`${boxLabel} can't push to ${repoName}`,
-								`git on ${boxLabel} can read ${repoName} but not push to it, so tasks there can't open a pull request or merge. Set the project up there anyway?`,
-							))
-						) {
-							reopenComposer(input);
-							return;
-						}
-						proj = await window.ateamHost.provision(input.alias, { cloneUrl: activeRepoRemote });
+						await window.ateamHost.connect(input.alias, { wake: true });
 					} finally {
 						setInfo(null);
 						setProvisioning(null);
 					}
-					// Re-list so the aggregate learns proj.id → this box; then create routes there.
-					await loadProjects();
-					projectId = proj.id;
 				}
 			}
 			const taskInput = { projectId, name: input.name, agentId: input.agentId };
 			let task: TaskDTO;
 			let created = true;
-			if (sourceIssue) {
+			if (sandboxTask) task = sandboxTask;
+			else if (sourceIssue) {
 				try {
 					const result = await window.ateam.tasks.createFromIssue({
 						...taskInput,
@@ -1830,18 +1761,18 @@ export function App() {
 		return version !== undefined && !boxSupports("cleanup", version) ? version : null;
 	}, [activeProjectId, activeMembers, envProtocol]);
 
-	// New task's and New loop's Project pill: under All the project is a choice
-	// made in the dialog, and picking one re-points it (its machines, its remote).
-	const projectPill = allProjects ? (
+	// Switch the checkout from the composer, including when a sandbox's copy
+	// and the Mac copy appear as separate projects.
+	const projectPill = (
 		<ProjectPicker
 			cards={unifiedProjects}
 			value={activeCard?.key ?? null}
 			onChange={(card) => {
 				const primary = card.members.find((m) => m.alias === null) ?? card.members[0];
-				if (primary) setActiveProjectId(primary.projectId);
+				if (primary) targetProject(primary.projectId);
 			}}
 		/>
-	) : undefined;
+	);
 
 	const cleanup = () => {
 		if (activeProjectId && !allProjects && cleanupBlockedBy === null) setCleanupOpen(true);
@@ -2669,92 +2600,34 @@ export function App() {
 			{composerOpen && activeCard && (
 				<PromptComposer
 					agents={agents}
-					initialName={
-						composerSeed ? (composerSeed.nameAuto ? "" : composerSeed.name) : composerIssue?.title
-					}
+					initialName={composerIssue?.title}
 					initialPrompt={
-						composerSeed
-							? composerSeed.prompt
-							: composerIssue
-								? `${composerIssue.title}\n\n${composerIssue.url}\n\n${composerIssue.body}`
-								: undefined
+						composerIssue
+							? `${composerIssue.title}\n\n${composerIssue.url}\n\n${composerIssue.body}`
+							: undefined
 					}
-					initialFiles={composerSeed?.files ?? composerFiles}
-					initialAlias={composerSeed?.alias}
-					project={projectPill}
+					initialFiles={composerFiles}
+					project={
+						allProjects || (!boundProjectId && !composerIssue && unifiedProjects.length > 1)
+							? projectPill
+							: undefined
+					}
 					environments={composerEnvs}
 					envAgents={envAgents}
-					onAdd={addTailscaleBox}
-					onInstall={installBox}
-					onForget={forgetBox}
 					onInstallAgent={installAgentOn}
 					onClose={() => {
 						setComposerOpen(false);
 						setComposerIssue(null);
 						setComposerFiles([]);
-						setComposerSeed(null);
 					}}
 					onCreate={composeTask}
 				/>
-			)}
-			{githubFix && (
-				<Dialog
-					open
-					onOpenChange={(open) => {
-						// Closing puts the task back in the composer rather than dropping it.
-						if (open) return;
-						const fix = githubFix;
-						setGithubFix(null);
-						reopenComposer(fix.input);
-					}}
-				>
-					<DialogContent
-						className="flex max-h-[calc(100vh-4rem)] flex-col gap-3 overflow-y-auto p-5 sm:max-w-[560px]"
-						aria-describedby={undefined}
-					>
-						<DialogTitle className="pr-8 text-sm font-medium">
-							{githubFix.label} can't see {githubFix.repo}
-						</DialogTitle>
-						<p className="gh-access-muted">
-							Its GitHub access doesn't include this repository, so cloning it there would fail.
-							Connect a token that includes it, then try again.
-						</p>
-						<GithubAccess
-							alias={githubFix.alias}
-							label={githubFix.label}
-							repos={[githubFix.repo]}
-						/>
-						<div className="flex justify-end gap-2">
-							<Button
-								size="sm"
-								variant="ghost"
-								onClick={() => {
-									const fix = githubFix;
-									setGithubFix(null);
-									reopenComposer(fix.input);
-								}}
-							>
-								Back to the task
-							</Button>
-							<Button
-								size="sm"
-								onClick={() => {
-									const fix = githubFix;
-									setGithubFix(null);
-									composeTask(fix.input);
-								}}
-							>
-								Try again
-							</Button>
-						</div>
-					</DialogContent>
-				</Dialog>
 			)}
 			{loopDialog && activeCard && (loopDialog.editId === null || editingLoop) && (
 				<LoopForm
 					key={loopDialog.editId ?? "new"}
 					editing={editingLoop ?? undefined}
-					project={projectPill}
+					project={allProjects ? projectPill : undefined}
 					// An edit is that loop's repo, which under All needn't be the active one.
 					members={
 						(editingLoop?.projectId && cardByProject.get(editingLoop.projectId)?.members) ||
@@ -2800,9 +2673,6 @@ export function App() {
 							header={note}
 							environments={composerEnvs}
 							envAgents={envAgents}
-							onAdd={addTailscaleBox}
-							onInstall={installBox}
-							onForget={forgetBox}
 							onInstallAgent={installAgentOn}
 							onClose={() => setProposalOpen(null)}
 							onCreate={(input) => {
@@ -2865,9 +2735,6 @@ export function App() {
 							header={note}
 							environments={composerEnvs}
 							envAgents={envAgents}
-							onAdd={addTailscaleBox}
-							onInstall={installBox}
-							onForget={forgetBox}
 							onInstallAgent={installAgentOn}
 							onClose={() => setLeadProposal(null)}
 							onCreate={(input) => {
@@ -2946,6 +2813,16 @@ export function App() {
 					</button>
 				</output>
 			)}
+			{sandboxSetup && (
+				<div className="sandbox-setup-toast">
+					<SetupStepper
+						title="Preparing Cubicle sandbox"
+						steps={CUBICLE_SETUP_STEPS.map((step) => CUBICLE_SETUP_LABELS[step])}
+						active={CUBICLE_SETUP_STEPS.indexOf(sandboxSetup.step)}
+						detail={sandboxSetup.detail}
+					/>
+				</div>
+			)}
 			{info && (
 				<div className="toast info" onClick={() => setInfo(null)}>
 					{info}
@@ -2958,6 +2835,15 @@ export function App() {
 		</div>
 	);
 }
+
+const CUBICLE_SETUP_LABELS: Record<CubicleSetupStep, string> = {
+	repository: "Prepare repository on this Mac",
+	connection: "Connect to Cubicle",
+	sandbox: "Prepare sandbox",
+	task: "Set up task",
+};
+
+const BOX_DESKTOP_STEPS = ["Prepare Box desktop", "Load viewer"];
 
 // The status pill's colour per column: the columns that want your eyes take
 // the status colours, Backlog and Done stay neutral.
@@ -3607,11 +3493,14 @@ function TaskPanel({
 	const [editorSrc, setEditorSrc] = useState<string | null>(null);
 	const [editorOpen, setEditorOpen] = useState(false);
 	const [editorBusy, setEditorBusy] = useState<string | null>(null);
-	// The browser on the task's box (its Chrome in noVNC). Kept mounted once
-	// loaded, like the editor, so hiding it doesn't drop the VNC session.
+	// The Box desktop in noVNC. Keep it mounted while hidden so the session stays connected.
+	const isCubicleBox = isCubicleAlias(alias);
 	const [browserSrc, setBrowserSrc] = useState<string | null>(null);
 	const [browserOpen, setBrowserOpen] = useState(false);
-	const [browserBusy, setBrowserBusy] = useState<string | null>(null);
+	const [browserBusy, setBrowserBusy] = useState<"checking" | "installing" | "viewer" | null>(null);
+	const [preview, setPreview] = useState<{ taskId: string; port: number } | null>(null);
+	const previewPort = preview?.taskId === task.id ? preview.port : null;
+	const previewActive = useRef(false);
 	// The task on screen now. This panel is reused across tasks, not remounted,
 	// and a browser open can outlive a switch (an install takes minutes): its
 	// result must not land in the next task's panel.
@@ -3660,6 +3549,8 @@ function TaskPanel({
 		setBrowserOpen(false);
 		setBrowserSrc(null);
 		setBrowserBusy(null);
+		setPreview(null);
+		previewActive.current = false;
 	}, [task.id]);
 
 	const refreshSessions = useCallback(async () => {
@@ -3889,6 +3780,50 @@ function TaskPanel({
 	const agentTerminal = tabs.some(
 		({ session }) => session.terminalId === terminalId && session.agentId !== "shell",
 	);
+
+	const openDesktop = () => {
+		void run(async () => {
+			setPreview(null);
+			previewActive.current = false;
+			setBrowserOpen(true);
+			setEditorOpen(false);
+			setChangesOpen(false);
+			// A loaded view stays connected (noVNC reconnects on its own),
+			// so only the first open asks the box.
+			if (browserSrc || browserBusy) return;
+			// After each await, touch the panel only if it still shows
+			// this task. An error still reaches the toast either way.
+			const forTask = task.id;
+			const stillShown = () => shownTaskId.current === forTask;
+			setBrowserBusy("checking");
+			try {
+				let view: { url: string };
+				try {
+					view = await window.ateam.browser.view(task.id);
+				} catch (e) {
+					if (!String(e).includes(BROWSER_NOT_INSTALLED_ERROR)) throw e;
+					if (stillShown()) setBrowserBusy("installing");
+					await window.ateam.browser.install(task.id).catch((err) => {
+						// A box from before browser:install: its own not-installed
+						// message carries the command to run there instead.
+						throw /Unknown method/.test(String(err)) ? e : err;
+					});
+					view = await window.ateam.browser.view(task.id);
+				}
+				if (stillShown()) {
+					setBrowserBusy("viewer");
+					setBrowserSrc(view.url);
+				}
+			} catch (e) {
+				if (stillShown() && !previewActive.current) setBrowserOpen(false);
+				if (/Unknown method/.test(String(e)))
+					throw new Error(`Update Ateam on "${alias}" to open its desktop here.`);
+				throw e;
+			} finally {
+				if (stillShown()) setBrowserBusy((current) => (current === "viewer" ? current : null));
+			}
+		});
+	};
 
 	// Whether a view covers the terminal, and whether the terminal instead docks
 	// beside it (both open at once). Only when the toggle wants it.
@@ -4137,79 +4072,32 @@ function TaskPanel({
 						}
 					/>
 				)}
-				{/* After the editor and its controls, not between them: each app keeps its
-				    own controls beside it. This is the browser half of "hand this task to
-				    a real app" — your own Chrome, so every session it holds is already
-				    signed in and an agent never meets a login wall on its first useful
-				    step. Its own controls will land to the right of it in turn. */}
-				{/* Offered only where it can work, which is what the optional binding
-				    means (see the protocol's note on `openBrowser`). Without this the
-				    `?.` call swallows a missing binding and the button just does
-				    nothing when clicked — which is exactly how it looks when a dev
-				    session hot-reloads this file while the preload stays behind. */}
-				{/* A task on a box drives the box's own Chrome, so there the button
-				    opens that browser in a panel instead of raising this Mac's. */}
 				{alias !== null ? (
-					<IconButton
-						icon={Globe}
-						active={browserOpen}
-						label={browserOpen ? "Back to terminal" : `Open the browser on "${alias}"`}
-						onClick={() => {
-							if (browserOpen) {
-								setBrowserOpen(false);
-								return;
-							}
-							void run(async () => {
+					isCubicleBox ? (
+						<CubicleBoxMenu
+							key={task.id}
+							taskId={task.id}
+							active={browserOpen ? (previewPort ?? "desktop") : null}
+							onDesktop={() => {
+								if (browserOpen && previewPort === null) setBrowserOpen(false);
+								else openDesktop();
+							}}
+							onPreview={(port) => {
+								previewActive.current = true;
+								setPreview({ taskId: task.id, port });
 								setBrowserOpen(true);
 								setEditorOpen(false);
 								setChangesOpen(false);
-								// A loaded view stays connected (noVNC reconnects on its own),
-								// so only the first open asks the box.
-								if (browserSrc) return;
-								// After each await, touch the panel only if it still shows
-								// this task. An error still reaches the toast either way.
-								const forTask = task.id;
-								const stillShown = () => shownTaskId.current === forTask;
-								setBrowserBusy("Opening the browser…");
-								try {
-									let view: { url: string };
-									try {
-										view = await window.ateam.browser.view(task.id);
-									} catch (e) {
-										// A box without the browser: offer it, as the editor does.
-										// Nothing is installed without a yes.
-										if (!String(e).includes(BROWSER_NOT_INSTALLED_ERROR)) throw e;
-										const ok = await confirm(
-											`Install a browser on "${alias}"?`,
-											`The agents on "${alias}" get a Chrome of their own, which you can watch and take over in this panel. Ateam installs Chrome, a virtual desktop and noVNC there with apt, so the box needs passwordless sudo and x86_64 Debian or Ubuntu. It takes a few minutes.`,
-										);
-										if (!ok) {
-											if (stillShown()) setBrowserOpen(false);
-											return;
-										}
-										if (stillShown())
-											setBrowserBusy(
-												`Installing the browser on "${alias}". This takes a few minutes…`,
-											);
-										await window.ateam.browser.install(task.id).catch((err) => {
-											// A box from before browser:install: its own not-installed
-											// message carries the command to run there instead.
-											throw /Unknown method/.test(String(err)) ? e : err;
-										});
-										view = await window.ateam.browser.view(task.id);
-									}
-									if (stillShown()) setBrowserSrc(view.url);
-								} catch (e) {
-									if (stillShown()) setBrowserOpen(false);
-									if (/Unknown method/.test(String(e)))
-										throw new Error(`Update Ateam on "${alias}" to open its browser here.`);
-									throw e;
-								} finally {
-									if (stillShown()) setBrowserBusy(null);
-								}
-							});
-						}}
-					/>
+							}}
+						/>
+					) : (
+						<IconButton
+							icon={Monitor}
+							active={browserOpen}
+							label={browserOpen ? "Close Box desktop" : "Open Box desktop"}
+							onClick={() => (browserOpen ? setBrowserOpen(false) : openDesktop())}
+						/>
+					)
 				) : (
 					window.ateam.utils.openBrowser && (
 						<IconButton
@@ -4356,16 +4244,46 @@ function TaskPanel({
 					</div>
 				)}
 
-				{(browserSrc || browserBusy) && (
-					<div className="editor-wrap" style={{ display: browserOpen ? "flex" : "none" }}>
-						{/* The box's Chrome, on its virtual desktop, in noVNC. */}
-						{browserSrc ? (
-							<iframe className="editor-frame" src={browserSrc} title="Browser" />
-						) : (
-							<div className="muted" style={{ display: "grid", placeItems: "center", flex: 1 }}>
-								{browserBusy}
-							</div>
-						)}
+				{browserOpen && previewPort !== null && (
+					<CubiclePreviewPane
+						key={`${task.id}:${previewPort}`}
+						taskId={task.id}
+						port={previewPort}
+						onClose={() => setBrowserOpen(false)}
+					/>
+				)}
+
+				{previewPort === null && (browserSrc || browserBusy) && (
+					<div className="editor-wrap flex-col" style={{ display: browserOpen ? "flex" : "none" }}>
+						{/* The Box desktop, streamed through noVNC. */}
+						<div className="box-desktop-viewer">
+							{browserSrc && (
+								<iframe
+									className="editor-frame"
+									src={browserSrc}
+									title="Box desktop"
+									onLoad={() =>
+										setBrowserBusy((current) => (current === "viewer" ? null : current))
+									}
+								/>
+							)}
+							{browserBusy && (
+								<div className="box-desktop-loading">
+									<SetupStepper
+										title="Opening Box desktop"
+										steps={BOX_DESKTOP_STEPS}
+										active={browserBusy === "viewer" ? 1 : 0}
+										detail={
+											browserBusy === "checking"
+												? "Checking the Box desktop"
+												: browserBusy === "installing"
+													? "Installing Chrome and the desktop services"
+													: "Loading the desktop stream"
+										}
+									/>
+								</div>
+							)}
+						</div>
 					</div>
 				)}
 

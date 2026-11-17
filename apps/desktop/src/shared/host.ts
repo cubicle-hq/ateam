@@ -14,6 +14,7 @@ import type {
 	ProjectDTO,
 	RepoAccessDTO,
 	SystemInfo,
+	TaskDTO,
 } from "@ateam/protocol";
 
 /** One grammar issue as the judge needs it (mirrors @ateam/server's GrammarJudgeIssue). */
@@ -55,6 +56,10 @@ export const HOST_CH = {
 	crossBoxSet: "host:crossBoxSet",
 	/** Clone+register a repo onto a specific box (connect it first). */
 	provision: "host:provision",
+	createCubicleTask: "host:create-cubicle-task",
+	listCubiclePorts: "host:list-cubicle-ports",
+	openCubiclePreview: "host:open-cubicle-preview",
+	closeCubiclePreview: "host:close-cubicle-preview",
 	/** Install the ateam engine on a reachable SSH box, then connect to it. */
 	install: "host:install",
 	/** Create a box from scratch at a cloud provider, provision it, and connect. */
@@ -82,6 +87,12 @@ export const HOST_CH = {
 	saveSecrets: "host:saveSecrets",
 	/** The provider's live catalog (regions + sizes) for the given/saved token. */
 	providerOptions: "host:providerOptions",
+	/** Connect Cubicle: state, start the browser approval, cancel, reopen, disconnect. */
+	cubicleStatus: "host:cubicleStatus",
+	cubicleConnect: "host:cubicleConnect",
+	cubicleCancel: "host:cubicleCancel",
+	cubicleOpenBrowser: "host:cubicleOpenBrowser",
+	cubicleDisconnect: "host:cubicleDisconnect",
 	/** Which wake providers have a key saved on this Mac (see AteamHost.wakeStatus). */
 	wakeStatus: "host:wakeStatus",
 	/** Check and save, or clear, one wake provider's key (encrypted). */
@@ -114,8 +125,58 @@ export interface InstallLogEvent {
 	chunk: string;
 }
 
+export type CubicleImageStep = "box" | "runtime" | "snapshot";
+export type CubicleImageStatus =
+	| { state: "building"; step: CubicleImageStep; detail: string }
+	| { state: "ready" }
+	| { state: "failed"; message: string };
+
+/** Ateam's Connect Cubicle connection, as the renderer may see it (never the token). */
+export interface CubicleStatus {
+	/** The Cubicle API this build talks to (production unless explicitly configured). */
+	api: string;
+	state: "disconnected" | "waiting" | "connected" | "reconnect";
+	image?: CubicleImageStatus;
+	/** While waiting: the code the person compares in the browser. */
+	userCode?: string;
+	/** The one organization the connection is bound to. */
+	org?: string;
+	/** Ateam's own account in that organization, e.g. `acme/ateam-1a2b3c`. */
+	identity?: string;
+	permissions?: string[];
+	expiresAt?: string;
+	/** Whether the organization allows creating Boxes; unknown while offline. */
+	boxCreateAllowed?: boolean;
+	/** Why it isn't connected, or a non-fatal problem checking the connection. */
+	message?: string;
+}
+
+/** A fresh box, full local checkout and initialized worktree for one task. */
+export const NEW_CUBICLE_SANDBOX = "__cubicle_sandbox__";
+export interface CubicleTaskInput {
+	/** Correlates setup progress with the task submission that started it. */
+	requestId?: string;
+	/** Retry an unfinished sandbox by its Cubicle box name. */
+	resumeBox?: string;
+	projectId: string;
+	name: string;
+	agentId: string;
+	nameAuto?: boolean;
+	issue?: { number: number; description: string };
+}
+export interface CubicleTaskResult {
+	alias: string;
+	project: ProjectDTO;
+	task: TaskDTO;
+}
+
+/** A Cubicle box (or organization) name: it lands in SSH config and CLI arguments. */
+export const CUBICLE_BOX_NAME = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
+
 /** What to create at the provider. Credentials fall back to the saved secrets. */
 export interface CreateBoxSpec {
+	provider?: "hetzner" | "cubicle";
+	resume?: boolean;
 	/** Box name → ssh_config alias + Tailscale hostname (sanitized to a DNS label). */
 	name: string;
 	/** Provider location slug (e.g. Hetzner `fsn1`). */
@@ -150,9 +211,13 @@ export interface InstallAgentResult {
 }
 
 /** A stage narration while a box is being created (no secrets, just the step). */
+export const CUBICLE_SETUP_STEPS = ["repository", "connection", "sandbox", "task"] as const;
+export type CubicleSetupStep = (typeof CUBICLE_SETUP_STEPS)[number];
+
 export interface CreateProgressEvent {
 	alias: string;
 	stage: string;
+	cubicleSetup?: { requestId?: string; step: CubicleSetupStep };
 }
 
 /** The steps of waking and reaching a box a provider puts to sleep. Empty `steps`
@@ -292,6 +357,10 @@ export interface AteamHost {
 	/** Connect the box if needed, then clone+register a repo ON it from its remote URL
 	 *  (so a task can run there). Returns the box's project row for that repo. */
 	provision(alias: string, input: { cloneUrl: string }): Promise<ProjectDTO>;
+	createCubicleTask(input: CubicleTaskInput): Promise<CubicleTaskResult>;
+	listCubiclePorts(taskId: string): Promise<number[]>;
+	openCubiclePreview(taskId: string, port: number): Promise<{ url: string }>;
+	closeCubiclePreview(url: string): Promise<void>;
 	/** Install the ateam engine on a fresh box over SSH (idempotent; sets up the
 	 *  phone's WebSocket listener too), then connect. `dest` is an ssh_config alias
 	 *  or `user@host`. Progress streams via onInstallLog. */
@@ -337,6 +406,12 @@ export interface AteamHost {
 	saveSecrets(patch: { hetznerToken?: string; tailscaleAuthKey?: string }): Promise<SecretsStatus>;
 	/** The provider's real regions + sizes for the given token (or the saved one). */
 	providerOptions(token?: string): Promise<ProviderOptions>;
+	cubicleStatus(retryImage?: boolean): Promise<CubicleStatus>;
+	cubicleConnect(): Promise<CubicleStatus>;
+	cubicleCancel(): Promise<CubicleStatus>;
+	cubicleOpenBrowser(): Promise<void>;
+	/** Deletes the stored key on this Mac; revoking happens in the Cubicle Dashboard. */
+	cubicleDisconnect(): Promise<CubicleStatus>;
 	/** Which wake providers have a key saved on this Mac. */
 	wakeStatus(): Promise<WakeStatus>;
 	/** Check `values` with the provider and save them (encrypted), or clear them
