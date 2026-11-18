@@ -5,13 +5,15 @@ Ateam can create a Box directly from the app or attach to an existing Box over S
 
 ## First run
 
-1. Install the Cubicle CLI and run `cubicle tunnel install` once. The tunnel
-   installer asks for administrator privileges.
+1. Nothing to install by hand. Ateam ships the Cubicle CLI. The first time it needs
+   the private network, it installs Cubicle's network helper and macOS asks for your
+   password once.
 2. In Ateam, open **Settings → Boxes → Add a box → Create a new box**. Select
    **Cubicle**, click **Connect Cubicle**, and approve the connection in the
    Cubicle Dashboard. Ateam prepares the reusable image while the form shows progress.
-3. Add or select a local project. If it needs setup, configure an initializer as described below.
-   In **New task**, select **Run on → New Cubicle sandbox** and choose a coding agent.
+3. Add or select a local project. In **New task**, select **Run on → New Cubicle
+   sandbox**. Select **Set up project environment** once, so later sandboxes start
+   from a prepared project image (see [Lifecycle](#lifecycle)). Then choose a coding agent.
    For example, choose Codex and ask it to create a Next.js app and start it on port
    3000. Complete the agent's sign-in on the Box when prompted.
 4. Open the **Cubicle** menu in the task toolbar and select **Port 3000** to preview
@@ -20,6 +22,10 @@ Ateam can create a Box directly from the app or attach to an existing Box over S
 Verified against Cubicle production with Ateam's desktop development build on
 November 16, 2026. Tested connection approval, image capture, fresh Box
 provisioning, Codex, the desktop, and the in-app port preview.
+
+The lifecycle described below (project images, Box removal, and repair of the network
+helper) is covered by unit tests. It has not yet been run end to end against Cubicle
+production.
 
 ## Set up an existing Box over SSH
 
@@ -103,48 +109,90 @@ process. The CLI login is no longer used. Connect is available on staging and pr
 `ATEAM_CUBICLE_API_URL=https://controller-staging.tailc41a49.ts.net`.
 Box listing, creation, start and SSH key registration use the HTTP API with the key.
 `cubicle connect` and `cubicle ssh-config` still run through the CLI with
-`CB_CLI_API_URL` and `CB_CLI_API_KEY`, and the tunnel helper from
-`cubicle tunnel install` must already be installed. Boxes belong to Ateam's own
+`CB_CLI_API_URL` and `CB_CLI_API_KEY`. Ateam installs and repairs the tunnel helper
+itself (`apps/desktop/src/main/cubicle-tunnel.ts`). Boxes belong to Ateam's own
 account (`ORG/ateam-xxxxxx`), so Resume setup only finds boxes Ateam created.
 
-## One sandbox per task
+## Lifecycle
 
-In the New task dialog, select **Run on → New Cubicle sandbox**. The selection is
-remembered for subsequent tasks. Each submission creates a fresh 2-vCPU, 4-GiB,
-20-GiB Cubicle box using the connected organization and API environment.
+Every task worktree gets its own Box. Three images make that fast:
 
-Ateam's **Prepare repository on this Mac** step packages Git history and collects
-uncommitted edits, deletions, and new files that Git does not ignore. The Box
-clones the Git bundle and applies those changes. Local-only commits travel with
-the bundle. Ignored build output, dependencies, and other Ateam worktrees stay
-on the Mac. Use the initializer to install dependencies or check out submodules.
-The transfer uses the Box's pinned SSH connection and needs no GitHub credentials.
+| Image | Holds | Made by | Made when |
+| --- | --- | --- | --- |
+| Ateam image | Engine, Node.js, agent CLIs, Chrome, desktop | Ateam, with no project or credentials | Once per Ateam release and organization |
+| Project image | The Ateam image, plus one project ready to work on | An agent, in the project's environment chat | When you select **Save project image** |
+| Task Box | The project image, plus one worktree | Ateam | Every new sandbox task |
 
-The task's new worktree is based on the local HEAD. Once seeding finishes, Ateam
-restores the changes into that worktree. If your project needs setup before
-the agent starts, set an initializer in `.ateam/sandbox.json`:
+### Project environment
+
+In the New task dialog, select **Run on → New Cubicle sandbox**. The line under the
+prompt shows which image the sandbox starts from. Select **Set up project
+environment**. Ateam creates the project's environment Box (`ateam-env-<project>-<id>`)
+from the Ateam image, copies the repository into it, and opens a task named
+**Project environment**. Its agent receives a brief: read how the project is set up,
+install toolchains and services system-wide, install dependencies in the main
+checkout, and verify the result. What you typed in the prompt is added to the brief.
+Complete agent and GitHub sign-ins in this Box; they become part of the image.
+
+When the agent reports that it is done, select **Save project image** in the task.
+Ateam stops the Box, saves its disk as a snapshot named
+`ateam-project.<project>.<commit>.<time>`, and leaves the Box stopped. The snapshot
+lives as long as the environment Box, so do not delete that Box in the Dashboard.
+
+To change the image later, select **Update environment** in the same place. Ateam
+starts the Box, sends the commits made since, and reopens the chat. Save again when
+done. New sandboxes use the newest image; running ones keep their disk.
+
+The engine's own state (its database, pairing and the chat history) is not part of
+the image. Ateam sets it aside before the snapshot and restores it when the
+environment Box starts again. A Box made from the image starts as a new engine.
+
+### One Box per task
+
+Each sandbox task creates a 2-vCPU Box named after the task. With a project image,
+the Box already has the checkout, its dependencies and the sign-ins. This Mac sends
+only the commits made since the image was saved, plus uncommitted edits, deletions
+and new files that Git does not ignore. Without a project image, the Box starts from
+the Ateam image and receives the whole Git history.
+
+The engine creates the task's worktree at the Mac's HEAD and seeds it from the main
+checkout (installed dependencies and env files). Ateam then applies the uncommitted
+changes on top. Ignored files on the Mac are never sent. The transfer uses the Box's
+pinned SSH connection and needs no GitHub credentials.
+
+If each worktree needs a command after it is created, or the app should start with
+the task, set them in `.ateam/sandbox.json`:
 
 ```json
-{"initializer": "bash scripts/setup-dev.sh"}
+{"initializer": "bun install --frozen-lockfile", "start": "bun dev &"}
 ```
 
 When no initializer is configured, Ateam checks `.ateam/init.sh`, `scripts/init.sh`,
-`init.sh`, `scripts/setup.sh`, then `setup.sh`. If none exists, Ateam starts the
-task after restoring the checkout. This repository supplies `scripts/init.sh`,
-which reinstalls Linux dependencies and builds the headless engine. An initializer,
-when present, must succeed before the composer launches the chosen agent. The chosen agent CLI is installed
-in the box; account authentication follows the existing box credential settings.
+`init.sh`, `scripts/setup.sh`, then `setup.sh`. A hook that fails does not fail the
+task: the task opens with a warning that quotes the hook's output, and its agent can
+fix it. With a project image the initializer should be short, because the image has
+already done the expensive work.
 
-Failures retain the box and its files for inspection. Boxes are persistent and
-are not automatically deleted when a task is removed. Progress appears in the
-app while Ateam prepares the Git files, provisions the Box, and sets up the task.
+Removing a task removes its Box when that was the Box's last task. The environment
+Box is never removed this way.
 
-To retry a failed setup, expand **Resume an unfinished sandbox** in the composer
-and enter the retained box name. Ateam collects the current Git history and local changes and resumes
-that box instead of creating another. Completed sandboxes and tasks with active
-terminal sessions cannot be overwritten through this option.
+### When something fails
 
-Task sandboxes use the worktree branch name as their Cubicle box name (up to Cubicle's 40-character limit). SSH uses `<branch>.<org>.cubicle.internal`; existing private-IP SSH entries migrate on resume. If the organization already has a box with that name, choose another task name or explicitly resume the unfinished setup.
+Ateam checks the Cubicle connection, its permissions and the private network before
+it creates a Box. A Box whose setup fails afterwards is deleted, so retrying is just
+submitting the task again; there is nothing to resume or clean up. Set
+`ATEAM_CUBICLE_KEEP_FAILED=1` to keep failed Boxes for inspection.
+
+| Message | What Ateam did | What you do |
+| --- | --- | --- |
+| Cubicle's network helper stopped running / is not installed | Asked macOS for administrator access and reinstalled the helper from its own CLI | Approve the prompt. If you cancelled it, try again |
+| It still does not answer after a repair | Reinstalled the helper, which did not start | Run `cubicle tunnel install` in Terminal |
+| The private connection could not be re-established | Dropped the session and connected again, once | Try again; check your network |
+| No box was created. Retry after Cubicle capacity is available | Nothing was allocated | Retry later, or delete unused Boxes |
+| The project's initializer failed | Created the task anyway | Let the task's agent fix it, or change `.ateam/sandbox.json` |
+
+Connections approved before this lifecycle lack the `boxes:delete` permission. The
+first sandbox task opens the Cubicle approval page to add it.
 
 For local development, set `ATEAM_CUBICLE_CLI` to the absolute path of a
 locally built Cubicle CLI. The CLI resolves application keys to authenticated
@@ -165,26 +213,25 @@ Use the sandbox's `start` hook to start the server when Ateam prepares the task.
 The hook should leave the server running in the background and exit once it is
 ready.
 
-## Reusable Ateam image
+## The Ateam image
 
-After approving **Connect Cubicle**, Ateam looks for a sandbox image that matches
-its runtime and desktop assets. The first connection builds it on a dedicated Box using Cubicle
-capacity. The connection form shows the builder, tool installation, and snapshot
-steps. Later connections and task launches reuse the saved image for that
-organization and Ateam connection.
+After approving **Connect Cubicle**, Ateam looks for an image that matches its
+runtime and desktop assets. The first connection builds it on a dedicated Box
+(`gold-runtime-…`) using Cubicle capacity. The connection form shows the builder,
+tool installation, and snapshot steps. Later connections, environment Boxes and
+task Boxes without a project image reuse it.
 
 The image contains the Ateam engine, Node.js and npm, supported agent CLIs,
-Chrome, the Linux desktop packages, and the Cubicle wallpaper. A Box initializes
-its own desktop profile and pairing state.
-Ateam copies the current checkout into each task Box, runs the repository's
-initializer and start hook, and configures the selected agent there. The image
-builder receives no repository, agent credentials, or desktop connection.
+Chrome, the Linux desktop packages, and the Cubicle wallpaper. The builder receives
+no repository, agent credentials, or desktop connection. Its Box stays stopped,
+because the snapshot lives only as long as it. Builders of earlier Ateam releases
+are deleted once the current image exists, and a builder whose build failed is
+deleted at once.
 
-Existing connections without snapshot permission can choose **Enable reusable
-image**. If the image build fails, the connection stays usable and Ateam can set
-up Boxes from the standard Cubicle image. Ateam stops failed builders where
-possible and retains them for inspection.
+If the image build fails, the connection stays usable and Ateam sets up Boxes from
+the standard Cubicle image. A Box made from an older project image keeps its engine
+until a released build of Ateam connects and upgrades it.
 
 New Cubicle tasks default to OpenCode with MiniMax M3.1 Flash through Fireworks AI.
 Ateam copies the selected provider credential to the individual task Box over
-SSH. The task's checkout copy still includes local ignored and untracked files.
+SSH.

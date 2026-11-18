@@ -40,7 +40,7 @@ sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
 interface ImageDependencies {
 	cubicle: Pick<
 		Cubicle,
-		"connectionKey" | "findGoldImage" | "provision" | "captureGoldImage" | "stopImageBuilder"
+		"connectionKey" | "listSnapshots" | "provision" | "captureImage" | "deleteBox" | "boxNames"
 	>;
 	runtimeVersion: string;
 	installWallpaper: string;
@@ -50,7 +50,12 @@ interface ImageDependencies {
 
 type Attempt = { status: CubicleImageStatus; image: Promise<string | undefined> };
 
-/** Image builds use a fresh Box. No project, engine connection or credentials enter it. */
+const BUILDER_PREFIX = "gold-runtime-";
+
+/**
+ * The Ateam image: the first of the three images (see cubicle-project.ts). Its build uses
+ * a fresh Box. No project, engine connection or credentials enter it.
+ */
 export function createCubicleImageCache({
 	cubicle,
 	runtimeVersion,
@@ -85,7 +90,17 @@ export function createCubicleImageCache({
 		const existing = attempts.get(key);
 		if (existing && (!retry || existing.status.state !== "failed")) return existing.image;
 
-		const builder = `gold-runtime-${fingerprint.slice(0, 12)}-${randomUUID().slice(0, 8)}`;
+		const builder = `${BUILDER_PREFIX}${fingerprint.slice(0, 12)}-${randomUUID().slice(0, 8)}`;
+		// A snapshot lives as long as its Box, so the current image's builder stays (stopped).
+		// Builders of earlier Ateam releases only hold capacity: Boxes made from their images
+		// own their disks. Best effort, and never the Box the current image came from.
+		const prune = async (keep: string) => {
+			const names = await cubicle.boxNames().catch(() => []);
+			for (const name of names) {
+				if (name.startsWith(BUILDER_PREFIX) && name !== keep)
+					await cubicle.deleteBox(name).catch(() => {});
+			}
+		};
 		const assertConnection = () => {
 			if (cubicle.connectionKey() !== key) throw new Error("The Cubicle connection changed.");
 		};
@@ -98,15 +113,17 @@ export function createCubicleImageCache({
 		const image = Promise.resolve().then(async () => {
 			try {
 				assertConnection();
-				const found = await cubicle.findGoldImage(imageName);
+				const found = (await cubicle.listSnapshots()).find((s) => s.name === imageName);
 				assertConnection();
 				if (found) {
 					attempt.status = { state: "ready" };
-					return found;
+					void prune(found.box.name);
+					return found.id;
 				}
 				const alias = await cubicle.provision(
 					{ provider: "cubicle", name: builder, region: "", size: "2" },
 					(detail) => progress("box", detail),
+					{ disposable: true },
 				);
 				allocated = true;
 				assertConnection();
@@ -137,20 +154,24 @@ bash -lc 'command -v ${agent.bin}'`,
 					'set -eu; sudo -n systemctl stop ateam.service; rm -rf -- "$HOME/.ateam"; sync',
 				);
 				assertConnection();
-				const id = await cubicle.captureGoldImage(builder, imageName);
+				const id = await cubicle.captureImage(builder, imageName);
 				assertConnection();
 				attempt.status = { state: "ready" };
+				void prune(builder);
 				return id;
 			} catch (error) {
-				// If the image failed after allocation, stop the builder to release its CPU and RAM.
+				// A builder that did not become an image is worth nothing: remove it, so a
+				// retry starts clean and no half-built Box holds capacity.
 				if (allocated && cubicle.connectionKey() === key) {
-					await cubicle.stopImageBuilder(builder).catch(() => {});
+					await cubicle.deleteBox(builder).catch(() => {});
 				}
-				const why = error instanceof Error ? error.message : String(error);
-				attempt.status = {
-					state: "failed",
-					message: allocated ? `${why} Builder ${builder} was retained.` : why,
-				};
+				const message = error instanceof Error ? error.message : String(error);
+				// Sandboxes fall back to the standard image, so without this line nothing
+				// outside the Create a box form says that the image was not built, or why.
+				console.warn(
+					`[ateam] Cubicle image: build stopped at "${attempt.status.state === "building" ? attempt.status.detail : "start"}": ${message}`,
+				);
+				attempt.status = { state: "failed", message };
 				return undefined;
 			}
 		});

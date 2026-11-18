@@ -52,6 +52,7 @@ import {
 	reportedWake,
 	type SettingsResult,
 	type SystemInfo,
+	type TaskDTO,
 	takeSnapshot,
 	tolerantRpc,
 	type WakeAdapter,
@@ -99,6 +100,7 @@ import {
 	type ConnectProgressEvent,
 	type CreateBoxSpec,
 	type CreateProgressEvent,
+	type CubicleProjectStatus,
 	type CubicleStatus,
 	type CubicleTaskInput,
 	type CubicleTaskResult,
@@ -107,6 +109,7 @@ import {
 	type HostStatus,
 	type InstallAgentResult,
 	type InstallLogEvent,
+	isCubicleEnvironmentAlias,
 	NEW_CUBICLE_SANDBOX,
 	type PhonePairing,
 	type PhonePairingBox,
@@ -137,8 +140,20 @@ import { configureCubicleAgent, loadCubicleAgentAuth } from "./cubicle-agent";
 import { createCubicleImageCache } from "./cubicle-gold";
 import { cubicleListenersCommand, parseCubicleListeners } from "./cubicle-preview";
 import { closeCubiclePreviewBrowser, openCubiclePreviewBrowser } from "./cubicle-preview-browser";
+import {
+	createProjectImages,
+	projectIdentity,
+	restoreEngineStateCommand,
+	WORKSPACE,
+} from "./cubicle-project";
 import { provisionCubicleTask } from "./cubicle-task";
 import { quoteShell } from "./cubicle-workspace";
+import {
+	bundledInstall,
+	engineBundleRoots,
+	findEngineBundle,
+	sendEngineBundle,
+} from "./engine-bundle";
 import { offlineBackend } from "./offline";
 
 // The one pre-quoted remote command (ssh space-joins remote args, so `bash -lc`
@@ -270,6 +285,8 @@ export interface Host {
 	/** Connect Cubicle: Ateam's own key for one Cubicle organization. */
 	readonly cubicle: Cubicle;
 	cubicleStatus(retryImage?: boolean): Promise<CubicleStatus>;
+	cubicleProjectStatus(projectId: string): Promise<CubicleProjectStatus>;
+	cubicleProjectSave(projectId: string): Promise<CubicleProjectStatus>;
 	/** Which wake providers have a key saved on this Mac. */
 	wakeStatus(): WakeStatus;
 	/** Check a wake provider's key and save it (encrypted), or clear it with null. */
@@ -606,7 +623,12 @@ export function createHost({ localEngine, broadcast }: HostDeps): Host {
 
 		// Resolve once: the same answer decides which wire to open AND what we save.
 		const wire = resolveTransport(db, alias);
-		if (opts.wake && wire !== "ws") await cubicle.wakeBox(alias);
+		if (opts.wake && wire !== "ws") {
+			await cubicle.wakeBox(alias);
+			// The environment Box stops with its engine's state set aside (its image must
+			// not carry it): put it back before reaching the engine.
+			if (isCubicleEnvironmentAlias(alias)) await cubicleRemote(alias, restoreEngineStateCommand);
+		}
 		const reached = await reach(alias, wire, opts);
 		const { client, rpc, info } = reached;
 		// Another connect to this box got there first while this one was on the
@@ -1109,6 +1131,12 @@ export function createHost({ localEngine, broadcast }: HostDeps): Host {
 		// box; what dev must not do is heal on connect, because that release can be behind
 		// main's protocol and the upgrade is then guaranteed futile (see connect()).
 		const pin = app.isPackaged ? `ATEAM_VERSION=v${app.getVersion()} ` : "";
+		// The engine this app ships with goes to the box over SSH, so the box runs exactly
+		// this build's engine and nothing depends on a GitHub release existing. Without a
+		// bundle (a checkout that never built the server), the release download remains.
+		const bundle = findEngineBundle(engineBundleRoots(__dirname));
+		const sshFlags = await firstContactFlags(dest);
+		if (bundle) await sendEngineBundle(dest, bundle, sshFlags);
 		// --tailscale joins the box to the tailnet and opens its network port there.
 		const flags = `${opts?.tailscale ? "--service --tailscale" : "--service"}${opts?.browser ? " --browser" : ""}`;
 		// pipefail for the download: a curl that fails hands bash nothing, bash exits 0 on
@@ -1116,14 +1144,18 @@ export function createHost({ localEngine, broadcast }: HostDeps): Host {
 		// ("RPC connection closed", seen on a boxd machine whose DNS came and went). Only
 		// for that pipe: the `ip | grep -q` ahead of it ends early on a match, on purpose.
 		const pipeline = wsAddr
-			? `set -o pipefail; curl -fsSL ${INSTALL_URL} | ${pin}ATEAM_WS_ADDR=${wsAddr} bash -s -- ${flags}`
+			? bundle
+				? bundledInstall(`ATEAM_WS_ADDR=${wsAddr} `, flags)
+				: `set -o pipefail; curl -fsSL ${INSTALL_URL} | ${pin}ATEAM_WS_ADDR=${wsAddr} bash -s -- ${flags}`
 			: // Single-quoted JS so the shell's ${tsip:+…} parameter expansion stays literal.
 				"tsip=$(command -v tailscale >/dev/null 2>&1 && tailscale ip -4 2>/dev/null | head -1 || true); " +
 				'[ -n "$tsip" ] && ip -4 -o addr show 2>/dev/null | grep -qF " $tsip/" || tsip=; ' +
-				`set -o pipefail; curl -fsSL ${INSTALL_URL} | ${pin}` +
-				'ATEAM_WS_ADDR_DEFAULT="${tsip:+$tsip:' +
-				WS_DEFAULT_PORT +
-				`}" bash -s -- ${flags}`;
+				(bundle
+					? bundledInstall(`ATEAM_WS_ADDR_DEFAULT="\${tsip:+$tsip:${WS_DEFAULT_PORT}}" `, flags)
+					: `set -o pipefail; curl -fsSL ${INSTALL_URL} | ${pin}` +
+						'ATEAM_WS_ADDR_DEFAULT="${tsip:+$tsip:' +
+						WS_DEFAULT_PORT +
+						`}" bash -s -- ${flags}`);
 
 		// The output's tail, to read ssh's own reason from if the setup fails.
 		let output = "";
@@ -1133,7 +1165,7 @@ export function createHost({ localEngine, broadcast }: HostDeps): Host {
 		let approvalOpened = false;
 		const result = await sshExec(dest, `bash -lc '${pipeline}'`, {
 			// Setting a box up is often the first contact with it: see firstContactFlags.
-			sshFlags: await firstContactFlags(dest),
+			sshFlags,
 			onData: (chunk) => {
 				output = (output + chunk).slice(-8192);
 				broadcast(HOST_CH.evtInstallLog, { dest, chunk } satisfies InstallLogEvent);
@@ -1193,6 +1225,49 @@ sudo -n install -D -m 644 "$tmp" /usr/local/share/ateam/cubicle-wallpaper.jpg
 			if (result.code !== 0) throw new Error(tail.trim() || `Image setup exited ${result.code}.`);
 		},
 	});
+
+	/** Run a command on a Cubicle Box over SSH and return what it printed. */
+	async function cubicleRemote(alias: string, command: string): Promise<string> {
+		let output = "";
+		const result = await sshExec(alias, `timeout 600 bash -lc ${quoteShell(command)}`, {
+			sshFlags: ["-o", "ConnectTimeout=20"],
+			onData: (chunk) => {
+				output += chunk;
+			},
+		});
+		if (result.code !== 0)
+			throw new Error(output.trim().slice(-1600) || `The Box command exited ${result.code}.`);
+		return output;
+	}
+	const projectImages = createProjectImages({
+		cubicle,
+		remote: cubicleRemote,
+		release: (alias) => disconnect(alias),
+	});
+	async function localProject(projectId: string): Promise<ProjectDTO> {
+		const projects = (await local.handle(CH.projectsList, [])) as ProjectDTO[];
+		// A sandbox's own project id stands for the project on this Mac it was copied from.
+		const localId = sourceLinks.get(projectId) ?? projectId;
+		const project = projects.find((p) => p.id === localId);
+		if (!project) throw new Error("This project is not on this Mac.");
+		return project;
+	}
+	async function cubicleProjectStatus(projectId: string): Promise<CubicleProjectStatus> {
+		const project = await localProject(projectId);
+		return projectImages.status(await projectIdentity(project.repoPath));
+	}
+	async function cubicleProjectSave(projectId: string): Promise<CubicleProjectStatus> {
+		const project = await localProject(projectId);
+		const identity = await projectIdentity(project.repoPath);
+		const current = await projectImages.status(identity);
+		const alias = current.environment?.alias;
+		if (!alias) throw new Error("Set up the project environment before saving its image.");
+		const home = (await cubicleRemote(alias, 'printf "%s" "$HOME"')).trim();
+		if (!home.startsWith("/")) throw new Error("Could not resolve the environment's home.");
+		return projectImages.save(identity, alias, `${home}/${WORKSPACE}/repository`, (stage) =>
+			broadcast(HOST_CH.evtCreateProgress, { alias, stage } satisfies CreateProgressEvent),
+		);
+	}
 
 	async function cubicleStatus(retryImage = false): Promise<CubicleStatus> {
 		const status = await cubicle.status();
@@ -1379,7 +1454,7 @@ sudo -n install -D -m 644 "$tmp" /usr/local/share/ateam/cubicle-wallpaper.jpg
 				} satisfies CreateProgressEvent);
 			const scope = spec.resume ? undefined : (await cubicle.status()).permissions;
 			const image = scope?.includes("boxes:snapshot") ? await cubicleImages.prepare() : undefined;
-			const alias = await cubicle.provision(spec, progress, image);
+			const alias = await cubicle.provision(spec, progress, { snapshotId: image });
 			progress(image ? "Connecting to your Box" : "Installing Ateam and connecting your box");
 			try {
 				return image ? await connect(alias) : await install(alias);
@@ -1640,7 +1715,14 @@ sudo -n install -D -m 644 "$tmp" /usr/local/share/ateam/cubicle-wallpaper.jpg
 			local,
 			aggregate: agg,
 			cubicle,
+			projectImages,
 			baseImage: cubicleImages.prepare,
+			baseImageStage: () => {
+				const image = cubicleImages.status();
+				return image?.state === "building" ? image.detail : undefined;
+			},
+			forget,
+			keepFailed: process.env.ATEAM_CUBICLE_KEEP_FAILED === "1",
 			connect,
 			configureAgent: async (alias) => {
 				if (agentAuth) await configureCubicleAgent(alias, agentAuth);
@@ -1658,6 +1740,11 @@ sudo -n install -D -m 644 "$tmp" /usr/local/share/ateam/cubicle-wallpaper.jpg
 				broadcast(HOST_CH.evtInstallLog, { dest, chunk } satisfies InstallLogEvent),
 		});
 		sourceLinks.set(result.project.id, input.projectId);
+		saveSourceLinks();
+		return result;
+	}
+
+	function saveSourceLinks(): void {
 		try {
 			const pendingPath = `${sourceLinksPath}.tmp`;
 			writeFileSync(pendingPath, JSON.stringify(Object.fromEntries(sourceLinks)), { mode: 0o600 });
@@ -1665,7 +1752,42 @@ sudo -n install -D -m 644 "$tmp" /usr/local/share/ateam/cubicle-wallpaper.jpg
 		} catch (error) {
 			console.warn("[ateam] Couldn't save Cubicle project links:", error);
 		}
-		return result;
+	}
+
+	async function cubicleBoxOf(
+		method: string,
+		args: unknown[],
+	): Promise<{ alias: string; projectId: string } | undefined> {
+		if (method !== CH.tasksRemove && method !== CH.tasksCleanup) return undefined;
+		const id = method === CH.tasksRemove ? (args[0] as { id?: string } | undefined)?.id : args[0];
+		if (typeof id !== "string") return undefined;
+		const owner = agg.ownerOf.get(id);
+		const alias = owner && [...backends].find(([, backend]) => backend === owner)?.[0];
+		if (!owner || !alias || !cubicle.boxOfAlias(alias)) return undefined;
+		if (method === CH.tasksCleanup) return { alias, projectId: id };
+		const task = (await owner.handle(CH.tasksGet, [id])) as TaskDTO;
+		return { alias, projectId: task.projectId };
+	}
+
+	/**
+	 * A task Box lives as long as its worktree. When the last task on one is removed, the
+	 * Box goes with it. Never the environment Box (it holds the project image), and only
+	 * Boxes this app made for a project on this Mac.
+	 */
+	async function retireTaskBox(alias: string, projectId: string): Promise<void> {
+		const name = cubicle.boxOfAlias(alias);
+		if (!name || isCubicleEnvironmentAlias(alias) || !sourceLinks.has(projectId)) return;
+		const backend = backends.get(alias);
+		if (!backend) return;
+		const projects = (await backend.handle(CH.projectsList, [])) as ProjectDTO[];
+		for (const project of projects) {
+			const tasks = (await backend.handle(CH.tasksList, [project.id])) as TaskDTO[];
+			if (tasks.length > 0) return;
+		}
+		forget(alias);
+		for (const project of projects) sourceLinks.delete(project.id);
+		saveSourceLinks();
+		await cubicle.deleteBox(name);
 	}
 
 	async function cubicleListeners(taskId: string) {
@@ -1715,7 +1837,14 @@ sudo -n install -D -m 644 "$tmp" /usr/local/share/ateam/cubicle-wallpaper.jpg
 				return settingsCall(method, args);
 			if (method === CH.credentialsGet || method === CH.credentialsUpdate)
 				return credentialsCall(method, args);
+			// Before a task is gone, note which Cubicle Box it lives on: afterwards nothing
+			// can say. A cleanup names its project instead of a task.
+			const retiring = await cubicleBoxOf(method, args).catch(() => undefined);
 			const result = await agg.handle(method, args, ctx);
+			if (retiring)
+				void retireTaskBox(retiring.alias, retiring.projectId).catch((error) =>
+					console.warn(`[ateam] Couldn't remove the Cubicle Box ${retiring.alias}:`, error),
+				);
 			if (method !== CH.projectsList || sourceLinks.size === 0) return result;
 			return (result as ProjectDTO[]).map((project) => {
 				const sourceProjectId = sourceLinks.get(project.id);
@@ -1747,20 +1876,27 @@ sudo -n install -D -m 644 "$tmp" /usr/local/share/ateam/cubicle-wallpaper.jpg
 		const stand = standIn(c.alias);
 		if (stand) backendList.push(stand); // the aggregate reads this same array
 	}
-	void sleepingAliases(known.map((c) => c.alias)).then((sleeping) => {
-		for (const c of known) {
-			if (sleeping.has(c.alias)) {
-				asleep.add(c.alias);
-				scheduleReconnect(c.alias);
-				continue;
+	// Cubicle Boxes are only reachable through the private network. Bring it up once,
+	// quietly (never an administrator prompt at launch), before trying them.
+	const cubicleNetwork = known.some((c) => cubicle.boxOfAlias(c.alias))
+		? cubicle.tunnel.ensure().catch(() => {})
+		: Promise.resolve();
+	void Promise.all([sleepingAliases(known.map((c) => c.alias)), cubicleNetwork]).then(
+		([sleeping]) => {
+			for (const c of known) {
+				if (sleeping.has(c.alias)) {
+					asleep.add(c.alias);
+					scheduleReconnect(c.alias);
+					continue;
+				}
+				void connect(c.alias).catch((err: unknown) => {
+					noteFailure(c.alias, err);
+					scheduleReconnect(c.alias);
+				});
 			}
-			void connect(c.alias).catch((err: unknown) => {
-				noteFailure(c.alias, err);
-				scheduleReconnect(c.alias);
-			});
-		}
-		if (asleep.size > 0) broadcastConnections();
-	});
+			if (asleep.size > 0) broadcastConnections();
+		},
+	);
 	/** Why a connect nobody awaits failed, kept for the connections list to show. */
 	function noteFailure(alias: string, err: unknown): void {
 		// A host:port box a provider puts to sleep can't be asked whether it sleeps
@@ -1882,6 +2018,8 @@ ${boxDesktopInstaller}`;
 		createBox,
 		cubicle,
 		cubicleStatus,
+		cubicleProjectStatus,
+		cubicleProjectSave,
 		installAgent,
 		boxReadiness,
 		updateBox,
@@ -1964,6 +2102,12 @@ export function registerHostIpc(host: Host): void {
 	ipcMain.handle(HOST_CH.cubicleCancel, () => host.cubicle.cancel());
 	ipcMain.handle(HOST_CH.cubicleOpenBrowser, () => host.cubicle.openBrowser());
 	ipcMain.handle(HOST_CH.cubicleDisconnect, () => host.cubicle.disconnect());
+	ipcMain.handle(HOST_CH.cubicleProjectStatus, (_e, projectId: string) =>
+		host.cubicleProjectStatus(projectId),
+	);
+	ipcMain.handle(HOST_CH.cubicleProjectSave, (_e, projectId: string) =>
+		host.cubicleProjectSave(projectId),
+	);
 	ipcMain.handle(HOST_CH.createBox, (_e, spec: CreateBoxSpec) => host.createBox(spec));
 	ipcMain.handle(HOST_CH.installAgent, (_e, alias: string, agentId: string) =>
 		host.installAgent(alias, agentId),

@@ -26,6 +26,20 @@ export function selectCubicleAgentAuth(auth: Record<string, unknown>): string {
 	return JSON.stringify({ "fireworks-ai": credential });
 }
 
+/**
+ * OpenCode on a Box never asks: the Box is the sandbox, and it is disposable. That
+ * includes paths outside the task's worktree, since project setup happens in the main
+ * checkout and system-wide.
+ */
+export function cubicleOpencodeConfig() {
+	return {
+		$schema: "https://opencode.ai/config.json",
+		model: CUBICLE_MODEL,
+		small_model: CUBICLE_MODEL,
+		permission: { "*": "allow", external_directory: "allow", doom_loop: "allow" },
+	};
+}
+
 /** Runs after cloning, so revocable provider credentials never enter the gold snapshot. */
 export async function configureCubicleAgent(alias: string, auth: string): Promise<void> {
 	if (!/^cb-[a-z0-9-]+$/.test(alias)) throw new Error("Invalid Cubicle SSH alias.");
@@ -42,15 +56,9 @@ export async function configureCubicleAgent(alias: string, auth: string): Promis
 	];
 	try {
 		await writeFile(join(directory, "auth.json"), auth, { mode: 0o600 });
-		await writeFile(
-			join(directory, "opencode.json"),
-			JSON.stringify({
-				$schema: "https://opencode.ai/config.json",
-				model: CUBICLE_MODEL,
-				small_model: CUBICLE_MODEL,
-			}),
-			{ mode: 0o600 },
-		);
+		await writeFile(join(directory, "opencode.json"), JSON.stringify(cubicleOpencodeConfig()), {
+			mode: 0o600,
+		});
 		await exec(
 			"ssh",
 			[

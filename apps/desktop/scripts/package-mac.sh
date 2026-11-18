@@ -114,13 +114,25 @@ fi
 rm -rf "$STAGE/out" "$STAGE/build" "$STAGE/scripts" "$STAGE/electron-builder.yml" "$STAGE/release"
 cp -R "$DESKTOP_DIR/out" "$DESKTOP_DIR/build" "$DESKTOP_DIR/scripts" "$STAGE/"
 cp "$DESKTOP_DIR/electron-builder.yml" "$STAGE/"
+# The engine this app installs on a box travels with the app (main/engine-bundle.ts),
+# so a box always runs this build's engine and no GitHub release has to exist.
+echo "==> engine bundle"
+( cd "$DESKTOP_DIR/../../packages/server" && bun run build:release )
+rm -rf "$STAGE/ateam-engine"
+mkdir -p "$STAGE/ateam-engine"
+cp "$DESKTOP_DIR/../../packages/server/dist/ateam-server.tar.gz" \
+   "$DESKTOP_DIR/../../packages/server/scripts/install.sh" "$STAGE/ateam-engine/"
+cat >> "$STAGE/electron-builder.yml" <<'YAML'
+extraResources:
+  - from: ateam-engine
+    to: ateam-engine
+YAML
 if [ -n "${ATEAM_CUBICLE_CLI_BUNDLE:-}" ]; then
   test -x "$ATEAM_CUBICLE_CLI_BUNDLE/bin/cubicle"
   test -x "$ATEAM_CUBICLE_CLI_BUNDLE/.tools/node/bin/node"
   rm -rf "$STAGE/cubicle-cli"
   ditto "$ATEAM_CUBICLE_CLI_BUNDLE" "$STAGE/cubicle-cli"
   cat >> "$STAGE/electron-builder.yml" <<'YAML'
-extraResources:
   - from: cubicle-cli
     to: cubicle-cli
 YAML

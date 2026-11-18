@@ -6,9 +6,9 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import {
 	initializeWorktreeCommand,
+	PROJECT_BASE_REF,
 	repositoryInitializer,
 	restoreRepositoryCommand,
-	sandboxName,
 	snapshotRepository,
 	transferSnapshot,
 } from "./cubicle-workspace";
@@ -56,7 +56,7 @@ test("Git history and local changes survive transfer from a linked worktree", as
 		const dest = join(root, "remote space's");
 		await mkdir(dest);
 		await cp(snapshot.archive, join(dest, "changes.tar"));
-		await cp(snapshot.bundle, join(dest, "repository.bundle"));
+		await cp(snapshot.bundle as string, join(dest, "repository.bundle"));
 		await cp(snapshot.replacedPaths, join(dest, "replaced-paths"));
 		await exec("bash", ["-c", restoreRepositoryCommand(dest, snapshot)]);
 		const repo = join(dest, "repository");
@@ -66,6 +66,11 @@ test("Git history and local changes survive transfer from a linked worktree", as
 		const worktree = join(dest, "task space's");
 		await exec("git", ["-C", repo, "worktree", "add", "-b", "task", worktree]);
 		await exec("bash", ["-c", initializeWorktreeCommand(dest, worktree, snapshot)]);
+		// The project's own hook runs after the checkout is in place, as its own step.
+		await exec("bash", [
+			"-c",
+			`set -eu\ncd '${worktree.replace(/'/g, "'\\''")}'\n${snapshot.initializer}`,
+		]);
 		expect((await readFile(join(worktree, "initialized.txt"), "utf8")).trim()).toBe(
 			await realpath(worktree),
 		);
@@ -78,12 +83,6 @@ test("Git history and local changes survive transfer from a linked worktree", as
 			snapshot.head,
 		);
 		expect((await exec("git", ["-C", repo, "fsck", "--full"])).stderr).not.toContain("error");
-		await expect(
-			exec("bash", [
-				"-c",
-				initializeWorktreeCommand(dest, worktree, { ...snapshot, initializer: "exit 42" }),
-			]),
-		).rejects.toThrow();
 	} finally {
 		await snapshot.cleanup();
 	}
@@ -117,12 +116,83 @@ test("initializer configuration is optional and invalid commands fail", async ()
 	}
 });
 
-test("box names match worktree branches and skip copied refs", async () => {
+test("a Box made from the project image receives only what changed and keeps its setup", async () => {
 	const { root, git } = await fixture();
-	expect(await sandboxName(root, "Next.js live browser demo")).toBe("next-js-live-browser-demo");
-	await git("branch", "next-js-live-browser-demo");
-	expect(await sandboxName(root, "Next.js live browser demo")).toBe("next-js-live-browser-demo-2");
-	await expect(sandboxName(root, "x".repeat(41))).rejects.toThrow("1–40");
+	const first = await snapshotRepository(root);
+	const dest = join(root, "..", `${root.split("/").pop()}-box`);
+	roots.push(dest);
+	await mkdir(dest);
+	const repo = join(dest, "repository");
+	const send = async (snapshot: typeof first) => {
+		await cp(snapshot.archive, join(dest, "changes.tar"));
+		if (snapshot.bundle) await cp(snapshot.bundle, join(dest, "repository.bundle"));
+		await cp(snapshot.replacedPaths, join(dest, "replaced-paths"));
+		await exec("bash", ["-c", restoreRepositoryCommand(dest, snapshot)]);
+	};
+	try {
+		// The environment Box: the whole repository, then what project setup leaves behind.
+		await send(first);
+		await mkdir(join(repo, "node_modules"));
+		await writeFile(join(repo, "node_modules/dep.js"), "installed");
+		await writeFile(join(repo, ".env"), "SECRET=1");
+		await exec("git", ["-C", repo, "config", "core.excludesFile", "/dev/null"]);
+		const base = (await exec("git", ["-C", repo, "rev-parse", PROJECT_BASE_REF])).stdout.trim();
+		expect(base).toBe(first.head);
+	} finally {
+		await first.cleanup();
+	}
+
+	// Nothing new on the Mac: no history travels at all.
+	const same = await snapshotRepository(root, undefined, { have: first.head.slice(0, 12) });
+	try {
+		expect(same.bundle).toBeUndefined();
+		await send(same);
+	} finally {
+		await same.cleanup();
+	}
+
+	// A new commit and an uncommitted edit: only the commit since the image is bundled.
+	await writeFile(join(root, "tracked.txt"), "second\n");
+	await git("commit", "-am", "second");
+	await writeFile(join(root, "tracked.txt"), "dirty\n");
+	const full = await snapshotRepository(root);
+	const delta = await snapshotRepository(root, undefined, { have: first.head.slice(0, 12) });
+	try {
+		const listed = (bundle?: string) =>
+			exec("git", ["-C", root, "bundle", "list-heads", bundle as string]).then((r) => r.stdout);
+		expect(await listed(delta.bundle)).toContain(delta.head);
+		expect(await listed(delta.bundle)).not.toContain("retained-history");
+		expect(await listed(full.bundle)).toContain("retained-history");
+		await send(delta);
+		expect((await exec("git", ["-C", repo, "rev-parse", "HEAD"])).stdout.trim()).toBe(delta.head);
+		expect((await exec("git", ["-C", repo, "rev-parse", PROJECT_BASE_REF])).stdout.trim()).toBe(
+			delta.head,
+		);
+		// Setup survives in the main checkout, which is what worktrees are seeded from.
+		expect(await readFile(join(repo, "node_modules/dep.js"), "utf8")).toBe("installed");
+		expect(await readFile(join(repo, ".env"), "utf8")).toBe("SECRET=1");
+		expect(await readFile(join(repo, "tracked.txt"), "utf8")).toBe("second\n");
+
+		// The task's worktree keeps what the engine seeded and gets the Mac's edit on top.
+		const worktree = join(dest, "task");
+		await exec("git", ["-C", repo, "worktree", "add", "-b", "task", worktree, delta.head]);
+		await mkdir(join(worktree, "node_modules"));
+		await writeFile(join(worktree, "node_modules/dep.js"), "seeded");
+		await exec("bash", ["-c", initializeWorktreeCommand(dest, worktree, delta)]);
+		expect(await readFile(join(worktree, "node_modules/dep.js"), "utf8")).toBe("seeded");
+		expect(await readFile(join(worktree, "tracked.txt"), "utf8")).toBe("dirty\n");
+	} finally {
+		await full.cleanup();
+		await delta.cleanup();
+	}
+
+	// An image whose commit this Mac does not have: fall back to sending everything.
+	const unknown = await snapshotRepository(root, undefined, { have: "0123456789ab" });
+	try {
+		expect(unknown.bundle).toBeDefined();
+	} finally {
+		await unknown.cleanup();
+	}
 });
 
 test("retries a dropped SCP transfer once, with a fresh connection to the same Box", async () => {

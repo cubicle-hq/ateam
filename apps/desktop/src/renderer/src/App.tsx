@@ -87,7 +87,14 @@ import {
 	useRef,
 	useState,
 } from "react";
-import { CUBICLE_SETUP_STEPS, type CubicleSetupStep, NEW_CUBICLE_SANDBOX } from "../../shared/host";
+import {
+	CUBICLE_ENVIRONMENT,
+	CUBICLE_ENVIRONMENT_TASK,
+	CUBICLE_SETUP_STEPS,
+	type CubicleSetupStep,
+	isCubicleEnvironmentAlias,
+	NEW_CUBICLE_SANDBOX,
+} from "../../shared/host";
 import { SessionGlyphs, SessionIcon } from "./components/AgentIcon";
 import { ChangesPane } from "./components/ChangeSteps";
 import { ChangesList, DiffStat } from "./components/Changes";
@@ -285,7 +292,6 @@ const FOCUS_COLLAPSE_LABEL: Record<View, string> = {
 
 /** A task as the New Task composer asks for it. */
 interface ComposeInput {
-	resumeBox?: string;
 	name: string;
 	nameAuto: boolean;
 	prompt: string;
@@ -702,6 +708,7 @@ export function App() {
 	const [provisioning, setProvisioning] = useState<string | null>(null);
 	const [sandboxSetup, setSandboxSetup] = useState<{
 		id: string;
+		environment?: boolean;
 		step: CubicleSetupStep;
 		detail: string;
 	} | null>(null);
@@ -876,21 +883,25 @@ export function App() {
 			disabled: !hasLocalCheckout,
 			disabledReason: "Select a project on this Mac",
 		},
-		...projectBoxes.map(({ connection: c, cubicle }) => ({
-			alias: c.alias,
-			label: wakeMachineName(c.wake) ?? c.alias,
-			cubicle,
-			disabled: false,
-			transport: c.transport,
-			asleep: c.asleep,
-			wake: c.wake ?? null,
-			error: connFailures[c.alias],
-			skew:
-				envProtocol[c.alias] !== undefined && envProtocol[c.alias] !== PROTOCOL_VERSION
-					? envProtocol[c.alias]
-					: undefined,
-			needsYou: needingBoxes.has(c.alias),
-		})),
+		// The environment Box is for preparing the project image, not for tasks: it is
+		// reached from the sandbox's own line in the composer.
+		...projectBoxes
+			.filter(({ connection }) => !isCubicleEnvironmentAlias(connection.alias))
+			.map(({ connection: c, cubicle }) => ({
+				alias: c.alias,
+				label: wakeMachineName(c.wake) ?? c.alias,
+				cubicle,
+				disabled: false,
+				transport: c.transport,
+				asleep: c.asleep,
+				wake: c.wake ?? null,
+				error: connFailures[c.alias],
+				skew:
+					envProtocol[c.alias] !== undefined && envProtocol[c.alias] !== PROTOCOL_VERSION
+						? envProtocol[c.alias]
+						: undefined,
+				needsYou: needingBoxes.has(c.alias),
+			})),
 	];
 
 	// Every loaded task, for the Lead chat to name and open the ones it touches.
@@ -1710,12 +1721,18 @@ export function App() {
 			// Resolve the engine's project row for this repo on the chosen environment.
 			let projectId: string;
 			let sandboxTask: TaskDTO | undefined;
-			if (input.alias === NEW_CUBICLE_SANDBOX) {
+			// The environment Box answers with its one task, which may exist already, and
+			// with the brief its agent starts from.
+			let sandboxCreated = true;
+			let agentPrompt = input.prompt;
+			const environment = input.alias === CUBICLE_ENVIRONMENT;
+			if (input.alias === NEW_CUBICLE_SANDBOX || environment) {
 				const member = card.members.find((m) => m.alias === null);
 				if (!member) throw new Error("A Cubicle sandbox needs a local repository to copy.");
 				const requestId = crypto.randomUUID();
 				setSandboxSetup({
 					id: requestId,
+					environment,
 					step: "repository",
 					detail: "Preparing the local checkout",
 				});
@@ -1723,24 +1740,29 @@ export function App() {
 					if (cubicleSetup?.requestId !== requestId) return;
 					setSandboxSetup((current) =>
 						current?.id === requestId
-							? { id: requestId, step: cubicleSetup.step, detail: stage }
+							? { ...current, step: cubicleSetup.step, detail: stage }
 							: current,
 					);
 				});
 				try {
 					const result = await window.ateamHost.createCubicleTask({
 						requestId,
+						kind: environment ? "environment" : "task",
 						projectId: member.projectId,
-						resumeBox: input.resumeBox,
-						name: input.name,
+						name: environment ? CUBICLE_ENVIRONMENT_TASK : input.name,
 						agentId: input.agentId,
 						nameAuto: input.nameAuto,
-						...(sourceIssue
+						...(environment ? { prompt: input.prompt } : {}),
+						...(sourceIssue && !environment
 							? { issue: { number: sourceIssue.number, description: input.prompt } }
 							: {}),
 					});
 					projectId = result.project.id;
 					sandboxTask = result.task;
+					sandboxCreated = result.created;
+					if (result.prompt) agentPrompt = result.prompt;
+					// The task is there; a failed project hook is for its agent, not a dead end.
+					if (result.warning) setError(result.warning);
 					await loadProjects();
 					setActiveProjectId(result.project.id);
 				} finally {
@@ -1774,7 +1796,7 @@ export function App() {
 			}
 			const taskInput = { projectId, name: input.name, agentId: input.agentId };
 			let task: TaskDTO;
-			let created = true;
+			let created = sandboxCreated;
 			if (sandboxTask) task = sandboxTask;
 			else if (sourceIssue) {
 				try {
@@ -1798,17 +1820,18 @@ export function App() {
 			// The created task's project is a member of the active card, so its tasks
 			// are already unioned into the board once loaded.
 			await loadTasks(task.projectId);
-			if (input.open) landTask(task.id);
+			if (input.open || environment) landTask(task.id);
 			else setPulseId(task.id);
 			if (!created) {
-				if (!input.open) announceStarted(task.id, `${task.name} already has a task`);
+				if (!input.open && !environment)
+					announceStarted(task.id, `${task.name} already has a task`);
 				return;
 			}
 			const { terminalId } = await window.ateam.pty.spawnAgent({
 				taskId: task.id,
 				agentId: input.agentId,
 				yolo: input.yolo,
-				prompt: input.prompt || undefined,
+				prompt: agentPrompt || undefined,
 				files: input.files.length ? input.files : undefined,
 				...(keepFiles?.length ? { keepFiles } : {}),
 			});
@@ -2704,6 +2727,7 @@ export function App() {
 					initialFiles={composerFiles}
 					project={projectPill}
 					environments={composerEnvs}
+					sandboxProjectId={activeMembers.find((m) => m.alias === null)?.projectId}
 					envAgents={envAgents}
 					onInstallAgent={installAgentOn}
 					onClose={() => {
@@ -2909,7 +2933,11 @@ export function App() {
 			{sandboxSetup && (
 				<div className="sandbox-setup-toast">
 					<SetupStepper
-						title="Preparing Cubicle sandbox"
+						title={
+							sandboxSetup.environment
+								? "Opening the project environment"
+								: "Preparing Cubicle sandbox"
+						}
 						cubicle
 						steps={CUBICLE_SETUP_STEPS.map((step) => CUBICLE_SETUP_LABELS[step])}
 						active={CUBICLE_SETUP_STEPS.indexOf(sandboxSetup.step)}
@@ -3615,6 +3643,29 @@ export function TaskPanel({
 	const [editorBusy, setEditorBusy] = useState<string | null>(null);
 	// The Box desktop in noVNC. Keep it mounted while hidden so the session stays connected.
 	const isCubicleBox = isCubicleAlias(alias);
+	// The project's environment Box: its one task is the chat that prepares the project
+	// image, and saving the image is the action that chat leads to.
+	const isEnvironment = isCubicleEnvironmentAlias(alias);
+	const [imageStage, setImageStage] = useState<string | null>(null);
+	const saveProjectImage = () =>
+		run(async () => {
+			const ok = await confirm(
+				"Save the project image?",
+				"The environment Box stops while its disk is saved, which ends the agent sessions running in it. New sandboxes of this project then start from this image. Open the environment again from the New task dialog to continue this chat.",
+			);
+			if (!ok) return;
+			setImageStage("Starting");
+			const off = window.ateamHost.onCreateProgress(({ alias: from, stage }) => {
+				if (from === alias) setImageStage(stage);
+			});
+			try {
+				await window.ateamHost.cubicleProjectSave(task.projectId);
+				onClose();
+			} finally {
+				off();
+				setImageStage(null);
+			}
+		});
 	const [browserSrc, setBrowserSrc] = useState<string | null>(null);
 	const [browserOpen, setBrowserOpen] = useState(false);
 	const [browserBusy, setBrowserBusy] = useState<"checking" | "installing" | "viewer" | null>(null);
@@ -4125,6 +4176,18 @@ export function TaskPanel({
 				<BoardToolsNote task={task} />
 				<BranchLine task={task} />
 			</div>
+			{isEnvironment && (
+				<div className="environment-banner">
+					<span>
+						{imageStage
+							? `Saving the project image: ${imageStage}`
+							: "This is the project environment. What is installed here becomes the image every new sandbox of this project starts from."}
+					</span>
+					<button type="button" disabled={imageStage !== null} onClick={saveProjectImage}>
+						Save project image
+					</button>
+				</div>
+			)}
 
 			<div className="actions">
 				{/* Left: this task's sessions and saved docs, and the `+` for another tab. What kind

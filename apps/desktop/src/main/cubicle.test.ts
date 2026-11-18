@@ -7,11 +7,14 @@ import {
 	cubicleApi,
 	cubicleError,
 	cubicleSshConfig,
+	freeBoxName,
 	provisioningFailure,
 	quoteCubicleIdentity,
 	reconnectReason,
+	removeCubicleSshConfig,
 	validateCubicleSpec,
 } from "./cubicle";
+import { CubicleTunnelError, type Tunnel } from "./cubicle-tunnel";
 
 describe("Cubicle creation", () => {
 	test("rejects unsafe names and unsupported resources before provisioning", () => {
@@ -73,6 +76,7 @@ const json = (status: number, body: unknown) =>
 function harness(
 	replies: ((url: string, init: RequestInit) => Response)[],
 	onConnected?: (saved: ProviderSecrets) => void,
+	tunnel?: Tunnel,
 ) {
 	let saved: ProviderSecrets = {};
 	const calls: { url: string; init: RequestInit }[] = [];
@@ -86,6 +90,7 @@ function harness(
 		openExternal: async (url) => void opened.push(url),
 		onConnected: () => onConnected?.(saved),
 		userData: "/nonexistent",
+		tunnel,
 		sleep: async () => {},
 		fetch: (async (url: string, init: RequestInit) => {
 			calls.push({ url, init });
@@ -224,6 +229,51 @@ test("provisioning recovery never tells users to resume a capacity-rejected box"
 	expect(provisioningFailure(new Error("Network timeout"), "dries/demo", false).message).toContain(
 		"could not be confirmed",
 	);
+	const removed = provisioningFailure(new Error("SSH failed"), "dries/demo", true, true).message;
+	expect(removed).toContain("was removed");
+	expect(removed).not.toContain("Resume");
+});
+
+test("a Box name that is taken gets the next free suffix within Cubicle's limit", () => {
+	expect(freeBoxName("fix-login", [])).toBe("fix-login");
+	expect(freeBoxName("fix-login", ["fix-login", "fix-login-2"])).toBe("fix-login-3");
+	const long = "a".repeat(40);
+	const next = freeBoxName(long, [long]);
+	expect(next).toHaveLength(40);
+	expect(next.endsWith("-2")).toBe(true);
+});
+
+test("a removed Box takes its SSH entry with it and leaves the rest", () => {
+	const original = "Include ~/.ssh/cubicle_config\nHost work\n  HostName work.example\n";
+	const withBox = cubicleSshConfig(original, "dries/demo", "cb-dries-demo", "demo.internal");
+	expect(removeCubicleSshConfig(withBox, "dries/demo", "cb-dries-demo")).toBe(original);
+	expect(removeCubicleSshConfig(original, "dries/demo", "cb-dries-demo")).toBe(original);
+});
+
+test("a private network that cannot be repaired stops provisioning before any Box exists", async () => {
+	const h = harness(
+		[
+			() =>
+				json(200, { identity: "acme/ateam-1", orgs: [{ name: "acme", boxCreateAllowed: true }] }),
+			() => json(200, []),
+		],
+		undefined,
+		{
+			ensure: async () => {
+				throw new CubicleTunnelError("helper_down", "helper is not responding");
+			},
+		},
+	);
+	h.saved().cubicle = {
+		api: cubicleApi(),
+		token: "test-key",
+		expiresAt: "2099-01-01T00:00:00Z",
+		connection,
+	};
+	await expect(
+		h.cubicle.provision({ provider: "cubicle", name: "demo", region: "", size: "2" }, () => {}),
+	).rejects.toThrow("network helper stopped running");
+	expect(h.calls.some((call) => call.init.method === "POST")).toBe(false);
 });
 
 test("gold image capture waits for a stopped box and a completed snapshot operation", async () => {
@@ -250,5 +300,5 @@ test("gold image capture waits for a stopped box and a completed snapshot operat
 		expiresAt: "2099-01-01T00:00:00Z",
 		connection,
 	};
-	expect(await h.cubicle.captureGoldImage("gold-builder", "gold-key")).toBe("image1");
+	expect(await h.cubicle.captureImage("gold-builder", "gold-key")).toBe("image1");
 });

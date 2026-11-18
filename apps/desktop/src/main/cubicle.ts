@@ -3,7 +3,7 @@
 // then acts as its own account in that organization (ORG/ateam-xxxxxx), never as the
 // person. The key stays in this process, encrypted at rest; the renderer only sees
 // CubicleStatus. The CLI is used only for what has no HTTP route: the WireGuard tunnel
-// and the pinned SSH configuration, both driven by the same key.
+// (cubicle-tunnel.ts) and the pinned SSH configuration, both driven by the same key.
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -13,6 +13,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { type CreateBoxSpec, CUBICLE_BOX_NAME, type CubicleStatus } from "../shared/host";
 import type { CubicleCredential, ProviderSecrets } from "./box-setup";
+import { createTunnel, repairTunnelHelper, type Tunnel } from "./cubicle-tunnel";
 
 /** Production by default; staging remains available through ATEAM_CUBICLE_API_URL. */
 export const CUBICLE_STAGING_API = "https://controller-staging.tailc41a49.ts.net";
@@ -25,6 +26,8 @@ export const CUBICLE_TASK_SCOPE = [
 	"boxes:create",
 	"boxes:power",
 	"boxes:snapshot",
+	// A task's Box lives as long as its worktree, and a Box whose setup failed is removed.
+	"boxes:delete",
 	"ssh",
 	"connect",
 ];
@@ -63,8 +66,14 @@ export function cubicleError(status: number, body: unknown): CubicleApiError {
 }
 
 /** Recovery advice must distinguish rejected creation from a box that actually exists. */
-export function provisioningFailure(error: unknown, box: string, allocated: boolean): Error {
+export function provisioningFailure(
+	error: unknown,
+	box: string,
+	allocated: boolean,
+	removed = false,
+): Error {
 	const message = error instanceof Error ? error.message : String(error);
+	if (removed) return new Error(`${message} The unfinished Box ${box} was removed. Try again.`);
 	if (allocated)
 		return new Error(`${message} Box ${box} was retained. Choose Resume setup with the same name.`);
 	if (error instanceof CubicleApiError) {
@@ -120,12 +129,40 @@ export function validateCubicleSpec(spec: Pick<CreateBoxSpec, "name" | "size">, 
 	if (![2, 4, 8].includes(Number(spec.size))) throw new Error("Choose 2, 4 or 8 vCPUs.");
 }
 
-interface Box {
+export interface CubicleBox {
 	id: string;
 	name: string;
 	state: string;
 	privateIp: string | null;
 	ssh: { ready: boolean; reason: string | null };
+}
+
+type Box = CubicleBox;
+
+/** A completed snapshot Ateam may create Boxes from. */
+export interface CubicleSnapshot {
+	id: string;
+	name: string;
+	createdAt: string;
+	box: { id: string; name: string };
+}
+
+export interface ProvisionOptions {
+	/** Create the Box from this snapshot instead of the base image. */
+	snapshotId?: string;
+	/** A Box made for one job: when its setup fails, delete it so a retry starts clean. */
+	disposable?: boolean;
+}
+
+/** The first of `base`, `base-2`, ... that no Box in the organization uses. */
+export function freeBoxName(base: string, taken: Iterable<string>): string {
+	const used = new Set(taken);
+	for (let n = 1; n <= 100; n++) {
+		const suffix = n === 1 ? "" : `-${n}`;
+		const name = base.slice(0, 40 - suffix.length).replace(/-+$/, "") + suffix;
+		if (!used.has(name)) return name;
+	}
+	throw new Error(`No free Cubicle Box name for ${base}.`);
 }
 
 interface Me {
@@ -146,6 +183,8 @@ export interface CubicleDeps {
 	openExternal(url: string): Promise<void>;
 	onConnected?(): void;
 	userData: string;
+	/** Replaces the CLI-backed tunnel (tests). */
+	tunnel?: Tunnel;
 	fetch?: typeof fetch;
 	sleep?: (ms: number) => Promise<void>;
 }
@@ -384,6 +423,15 @@ export function createCubicle(deps: CubicleDeps) {
 		}
 	}
 
+	const tunnel =
+		deps.tunnel ?? createTunnel({ cli: cliCall, repair: () => repairTunnelHelper(cli) });
+
+	const orgName = () => connected().connection.org.name;
+	const listBoxes = () => api<Box[]>("GET", `/v1/orgs/${encodeURIComponent(orgName())}/boxes`);
+	async function findBox(name: string): Promise<Box | undefined> {
+		return (await listBoxes()).find((box) => box.name === name);
+	}
+
 	async function waitForBox(id: string, progress: (stage: string) => void): Promise<Box> {
 		const deadline = Date.now() + 15 * 60_000;
 		let shown = "";
@@ -423,23 +471,33 @@ export function createCubicle(deps: CubicleDeps) {
 			await api("POST", `/v1/boxes/${encodeURIComponent(target.id)}/start`);
 		}
 		await waitForBox(target.id, () => {});
-		await cliCall(["connect"]);
+		// Waking is a person's action: a dead tunnel helper may be repaired here.
+		await tunnel.ensure({ interactive: true });
+		await reachOverSsh(alias, () => {});
+	}
+
+	/** SSH can lag a "connected" tunnel whose session went stale: refresh it once. */
+	async function reachOverSsh(alias: string, progress: (stage: string) => void): Promise<void> {
 		const { waitForSsh } = await import("./box-setup");
-		await waitForSsh(alias);
+		try {
+			await waitForSsh(alias, 12);
+		} catch {
+			progress("Refreshing the private network");
+			await tunnel.ensure({ fresh: true, progress });
+			await waitForSsh(alias, 24);
+		}
 	}
 
 	async function provision(
 		spec: CreateBoxSpec,
 		progress: (stage: string) => void,
-		snapshotId?: string,
+		{ snapshotId, disposable = false }: ProvisionOptions = {},
 	): Promise<string> {
 		const org = connected().connection.org.name;
 		validateCubicleSpec(spec, org);
-		// Lazily: box-setup loads electron, which this module's tests run without.
-		const { generateBoxKey, waitForSsh } = await import("./box-setup");
 		const box = `${org}/${spec.name}`;
 		const alias = `cb-${org}-${spec.name}`;
-		progress("Checking the Cubicle connection and private tunnel");
+		progress("Checking the Cubicle connection");
 		const me = await api<Me>("GET", "/v1/me");
 		const orgInfo = me.orgs.find((o) => o.name === org);
 		const boxes = await api<Box[]>("GET", `/v1/orgs/${encodeURIComponent(org)}/boxes`);
@@ -450,14 +508,20 @@ export function createCubicle(deps: CubicleDeps) {
 			throw new Error(`${box} does not exist. Switch to Create new box.`);
 		if (!existing && !orgInfo?.boxCreateAllowed)
 			throw new Error(`Box creation is not enabled for the ${org} organization.`);
-		await cliCall(["tunnel", "status"]);
+		// Before any Box exists: a tunnel that cannot be repaired must not leave one behind.
+		progress("Checking the private network");
+		await tunnel.ensure({ interactive: true, progress });
 		const configPath = join(homedir(), ".ssh/config");
 		const config = existsSync(configPath) ? readFileSync(configPath, "utf8") : "";
 		const marker = `# Ateam Cubicle ${box}`;
 		if (new RegExp(`^Host\\s+${alias}(?:\\s|$)`, "m").test(config) && !config.includes(marker))
 			throw new Error(`SSH alias ${alias} is already in use.`);
 		const keyPath = join(deps.userData, "box-keys", `${alias}.key`);
-		if (!existsSync(keyPath)) generateBoxKey(deps.userData, alias);
+		if (!existsSync(keyPath)) {
+			// Lazily: box-setup loads electron, which this module's tests run without.
+			const { generateBoxKey } = await import("./box-setup");
+			generateBoxKey(deps.userData, alias);
+		}
 		progress("Registering this app's SSH key");
 		const publicKey = readFileSync(`${keyPath}.pub`, "utf8").trim();
 		const keys = await api<{ publicKey?: string; fingerprint: string }[]>("GET", "/v1/keys");
@@ -471,6 +535,7 @@ export function createCubicle(deps: CubicleDeps) {
 			}
 		}
 		let allocated = Boolean(existing);
+		let created: Box | undefined;
 		try {
 			let target: Box;
 			if (!existing) {
@@ -489,6 +554,7 @@ export function createCubicle(deps: CubicleDeps) {
 					},
 					{ "idempotency-key": randomUUID() },
 				);
+				created = target;
 			} else {
 				target = existing;
 				if (existing.state !== "running") {
@@ -499,7 +565,7 @@ export function createCubicle(deps: CubicleDeps) {
 			allocated = true;
 			await waitForBox(target.id, progress);
 			progress("Configuring trusted SSH over the private tunnel");
-			await cliCall(["connect"]);
+			await tunnel.ensure({ progress });
 			await cliCall(["ssh-config", box, "--alias", alias, "--identity", keyPath]);
 			// The Cubicle CLI emits IdentityFile without quoting macOS app paths.
 			const managedPath = join(homedir(), ".ssh/cubicle_config");
@@ -511,20 +577,68 @@ export function createCubicle(deps: CubicleDeps) {
 			const current = existsSync(configPath) ? readFileSync(configPath, "utf8") : "";
 			writeFileSync(configPath, cubicleSshConfig(current, box, alias, hostname), { mode: 0o600 });
 			progress("Waiting for SSH");
-			await waitForSsh(alias);
+			await reachOverSsh(alias, progress);
 			return alias;
 		} catch (error) {
-			throw provisioningFailure(error, box, allocated);
+			// A Box this call created for one job is worthless half-made: remove it, so the
+			// retry is a plain retry and nothing lingers in the organization.
+			let removed = false;
+			if (created && disposable) {
+				removed = await api("DELETE", `/v1/boxes/${encodeURIComponent(created.id)}`).then(
+					() => true,
+					() => false,
+				);
+				if (removed) await forgetSshEntry(box, alias);
+			}
+			throw provisioningFailure(error, box, allocated, removed);
 		}
 	}
 
+	/**
+	 * Forget how to reach a deleted Box. Its multiplexed SSH connection goes first: a new
+	 * Box may take the same name within seconds, and must not be handed the old socket.
+	 */
+	async function forgetSshEntry(box: string, alias: string): Promise<void> {
+		await exec("ssh", ["-O", "exit", alias], { timeout: 5000 }).catch(() => {});
+		const configPath = join(homedir(), ".ssh/config");
+		try {
+			const current = readFileSync(configPath, "utf8");
+			const next = removeCubicleSshConfig(current, box, alias);
+			if (next !== current) writeFileSync(configPath, next, { mode: 0o600 });
+		} catch {
+			/* nothing to forget */
+		}
+	}
+
+	/** Delete a Box Ateam created, with its snapshots. A missing Box is already gone. */
+	async function deleteBox(name: string): Promise<void> {
+		const org = orgName();
+		const box = await findBox(name);
+		if (box) await api("DELETE", `/v1/boxes/${encodeURIComponent(box.id)}`);
+		await forgetSshEntry(`${org}/${name}`, `cb-${org}-${name}`);
+	}
+
+	/** The organization name behind a `cb-<org>-<box>` alias Ateam wrote. */
+	function boxOfAlias(alias: string): string | undefined {
+		const org = stored()?.connection.org.name;
+		const prefix = `cb-${org}-`;
+		return org && alias.startsWith(prefix) ? alias.slice(prefix.length) : undefined;
+	}
+
+	/** The SSH alias `provision` gives a Box of the connected organization. */
+	function aliasOfBox(name: string): string | undefined {
+		const org = stored()?.connection.org.name;
+		return org ? `cb-${org}-${name}` : undefined;
+	}
+
+	const boxNames = async () => (await listBoxes()).map((box) => box.name);
+
+	async function listSnapshots(): Promise<CubicleSnapshot[]> {
+		return api<CubicleSnapshot[]>("GET", `/v1/orgs/${encodeURIComponent(orgName())}/snapshots`);
+	}
+
 	async function findGoldImage(name: string): Promise<string | undefined> {
-		const org = connected().connection.org.name;
-		const snapshots = await api<{ id: string; name: string }[]>(
-			"GET",
-			`/v1/orgs/${encodeURIComponent(org)}/snapshots`,
-		);
-		return snapshots.find((snapshot) => snapshot.name === name)?.id;
+		return (await listSnapshots()).find((snapshot) => snapshot.name === name)?.id;
 	}
 
 	function connectionKey(): string | undefined {
@@ -534,20 +648,18 @@ export function createCubicle(deps: CubicleDeps) {
 	}
 
 	async function findImageBuilder(boxName: string): Promise<Box> {
-		const org = connected().connection.org.name;
-		const boxes = await api<Box[]>("GET", `/v1/orgs/${encodeURIComponent(org)}/boxes`);
-		const box = boxes.find((box) => box.name === boxName);
-		if (!box) throw new Error(`Gold image builder ${boxName} was not found.`);
+		const box = await findBox(boxName);
+		if (!box) throw new Error(`Image builder ${boxName} was not found.`);
 		return box;
 	}
 
-	async function stopImageBuilder(boxName: string): Promise<void> {
+	async function stopBox(boxName: string): Promise<void> {
 		const box = await findImageBuilder(boxName);
 		if (box.state !== "stopped") await api("POST", `/v1/boxes/${box.id}/stop`);
 	}
 
 	/** Only called on Ateam's dedicated image builder. */
-	async function captureGoldImage(boxName: string, name: string): Promise<string> {
+	async function captureImage(boxName: string, name: string): Promise<string> {
 		const box = await findImageBuilder(boxName);
 		if (box.state !== "stopped") await api("POST", `/v1/boxes/${box.id}/stop`);
 		const deadline = Date.now() + 15 * 60_000;
@@ -555,7 +667,7 @@ export function createCubicle(deps: CubicleDeps) {
 			const current = await api<Box>("GET", `/v1/boxes/${box.id}`);
 			if (current.state === "stopped") break;
 			if (current.state === "failed" || Date.now() >= deadline)
-				throw new Error(`Gold image builder ${boxName} did not stop.`);
+				throw new Error(`Box ${boxName} did not stop.`);
 			await sleep(2000);
 		}
 		const operation = await api<{ id: string }>(
@@ -573,12 +685,12 @@ export function createCubicle(deps: CubicleDeps) {
 			if (result.state === "done") break;
 			if (["failed", "unknown"].includes(result.state) || Date.now() >= snapshotDeadline)
 				throw new Error(
-					`Gold image capture did not complete: ${JSON.stringify(result.error ?? result.state)}`,
+					`The snapshot did not complete: ${JSON.stringify(result.error ?? result.state)}`,
 				);
 			await sleep(2000);
 		}
 		const id = await findGoldImage(name);
-		if (!id) throw new Error("Cubicle finished capture but did not publish the gold image.");
+		if (!id) throw new Error("Cubicle finished the snapshot but did not list it.");
 		return id;
 	}
 
@@ -590,11 +702,18 @@ export function createCubicle(deps: CubicleDeps) {
 		disconnect,
 		provision,
 		wakeBox,
+		tunnel,
+		deleteBox,
+		findBox,
+		boxNames,
+		boxOfAlias,
+		aliasOfBox,
+		listSnapshots,
 		ensurePermissions,
 		connectionKey,
 		findGoldImage,
-		stopImageBuilder,
-		captureGoldImage,
+		stopBox,
+		captureImage,
 	};
 }
 
@@ -627,6 +746,14 @@ export function cubicleSshConfig(
 	if (current.includes(marker) && !pattern.test(current))
 		throw new Error("The app's SSH entry was edited. Restore it before resuming setup.");
 	return current.includes(marker) ? current.replace(pattern, block) : `${block}\n${current}`;
+}
+
+/** Drop the entry `cubicleSshConfig` wrote for a Box that no longer exists. */
+export function removeCubicleSshConfig(current: string, box: string, alias: string): string {
+	const pattern = new RegExp(
+		`# Ateam Cubicle ${box}\\nHost ${alias}\\n  HostName [^\\n]+\\n(?:  ControlMaster auto\\n  ControlPersist 120\\n  ControlPath ~/\\.ssh/ateam-%C\\n)?Host \\*\\n\\n?`,
+	);
+	return current.replace(pattern, "");
 }
 
 export function quoteCubicleIdentity(config: string, keyPath: string): string {

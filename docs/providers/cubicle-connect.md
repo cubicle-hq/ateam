@@ -29,7 +29,9 @@ is in `apps/desktop/src/main/cubicle.ts`.
 5. Use `Authorization: Bearer <token>` for every Cubicle call. `GET /v1/me` returns
    `apiKey.connection` and the one organization in `orgs` (with `boxCreateAllowed`).
 
-Ateam requests the default scopes plus `boxes:snapshot`. After saving the approved
+Ateam requests the default scopes plus `boxes:snapshot` (images) and `boxes:delete`
+(a task's Box is removed with its task, and a Box whose setup failed is removed at
+once). After saving the approved
 connection, the desktop checks for its reusable image and starts a build when one
 is missing. This runs in the main process while the connection form displays progress.
 
@@ -59,8 +61,12 @@ An agent can start the same flow; the person still approves it in the browser.
 | `cubicle keys list/add`                   | `GET /v1/keys`, `POST /v1/keys` `{ publicKey: "ssh-ed25519 ..." }`      |
 | `cubicle connect`, `cubicle ssh-config`   | The same CLI commands with env `CB_CLI_API_URL={API}` and `CB_CLI_API_KEY={token}` |
 
-The tunnel uses the helper from `cubicle tunnel install`. Run it once with
-administrator privileges. Use `cubicle tunnel status` to check the helper.
+The tunnel needs Cubicle's root network helper. Ateam installs it, and reinstalls it
+when it stops answering, by running the bundled CLI's `scripts/tunnel.sh install`
+behind a macOS administrator prompt. It only prompts while a person is waiting for
+a Box, never from a background reconnect. `cubicle tunnel status` reports
+`installed` even when the helper is not running, so Ateam decides from
+`cubicle connect` itself.
 
 ## Behaviour to know
 

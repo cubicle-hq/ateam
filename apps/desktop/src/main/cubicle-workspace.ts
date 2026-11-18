@@ -3,8 +3,6 @@ import { lstat, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { promisify } from "node:util";
-import { slugify } from "@ateam/git-core";
-import { CUBICLE_BOX_NAME } from "../shared/host";
 
 const exec = promisify(execFile);
 export const quoteShell = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`;
@@ -52,10 +50,14 @@ export async function repositoryStart(root: string): Promise<string | undefined>
 	}
 }
 
+/** The last commit the Mac sent: everything up to it is on the Box. */
+export const PROJECT_BASE_REF = "refs/ateam/base";
+
 export interface RepositorySnapshot {
 	directory: string;
 	archive: string;
-	bundle: string;
+	/** Absent when the Box already holds HEAD (its project image is at or past it). */
+	bundle?: string;
 	replacedPaths: string;
 	head: string;
 	origin: string;
@@ -64,10 +66,15 @@ export interface RepositorySnapshot {
 	cleanup(): Promise<void>;
 }
 
-/** Git carries committed files and history. The archive carries only working-tree changes. */
+/**
+ * Git carries committed files and history. The archive carries only working-tree changes.
+ * `have` is a commit the Box already holds with all its history (the head its project
+ * image was saved at): the bundle then carries only what came after it.
+ */
 export async function snapshotRepository(
 	root: string,
 	progress?: (message: string) => void,
+	options: { have?: string } = {},
 ): Promise<RepositorySnapshot> {
 	root = await realpath(root);
 	const initializer = await repositoryInitializer(root);
@@ -78,11 +85,30 @@ export async function snapshotRepository(
 	const directory = await mkdtemp(join(tmpdir(), "ateam-cubicle-"));
 	const cleanup = () => rm(directory, { recursive: true, force: true });
 	try {
-		const bundle = join(directory, "repository.bundle");
+		let bundle: string | undefined = join(directory, "repository.bundle");
 		const archive = join(directory, "changes.tar");
 		const replacedPaths = join(directory, "replaced-paths");
-		progress?.("Your Mac is packaging Git history");
-		await git("bundle", "create", bundle, "--all", "HEAD");
+		// An abbreviated or unknown commit resolves to nothing here, which means "send it all".
+		const have = options.have
+			? await git("rev-parse", "--verify", "--quiet", `${options.have}^{commit}`).then(
+					(out) => out.trim() || undefined,
+					() => undefined,
+				)
+			: undefined;
+		if (!have) {
+			progress?.("Your Mac is packaging Git history");
+			await git("bundle", "create", bundle, "--all", "HEAD");
+		} else if (
+			await git("merge-base", "--is-ancestor", head, have).then(
+				() => true,
+				() => false,
+			)
+		) {
+			bundle = undefined;
+		} else {
+			progress?.("Your Mac is packaging the commits since the project image");
+			await git("bundle", "create", bundle, "HEAD", `^${have}`);
+		}
 		progress?.("Your Mac is collecting local edits and new files");
 		const exclusions = [".ateam/worktrees"];
 		const [worktrees, changed, untracked] = await Promise.all([
@@ -142,39 +168,20 @@ export async function snapshotRepository(
 	}
 }
 
-/** Match the branch allocator in the copied repository, including existing refs. */
-export async function sandboxName(root: string, taskName: string): Promise<string> {
-	const base = slugify(taskName);
-	const { stdout } = await exec("git", [
-		"-C",
-		root,
-		"for-each-ref",
-		"--format=%(refname)",
-		"refs/heads",
-		"refs/remotes/origin",
-	]);
-	const refs = new Set(stdout.trim().split("\n"));
-	for (let n = 1; n <= 100; n++) {
-		const name = base + (n === 1 ? "" : `-${n}`);
-		if (!CUBICLE_BOX_NAME.test(name))
-			throw new Error(
-				"Use a task name whose branch has 1–40 lowercase letters, numbers or dashes for Cubicle.",
-			);
-		if (!refs.has(`refs/heads/${name}`) && !refs.has(`refs/remotes/origin/${name}`)) return name;
-	}
-	throw new Error("No free branch name for this Cubicle task. Choose another task name.");
-}
-
-/** Restore the repository metadata after transferring the Git bundle and changes. */
+/**
+ * Restore the repository after transferring the Git bundle and changes. A Box made from
+ * a project image already has the checkout: it only moves to the Mac's HEAD, keeping
+ * what project setup left there (dependencies, env files, local edits where possible).
+ */
 export function restoreRepositoryCommand(
 	dir: string,
-	snapshot: Pick<RepositorySnapshot, "head" | "origin">,
+	snapshot: Pick<RepositorySnapshot, "head" | "origin" | "bundle">,
 ): string {
 	return `set -eu
 cd ${quoteShell(dir)}
 fresh=
 if [ -d repository/.git ]; then
-  git -C repository fetch ../repository.bundle HEAD
+  ${snapshot.bundle ? "git -C repository fetch --no-tags ../repository.bundle HEAD" : ":"}
 else
   mkdir -p repository
   git clone --mirror repository.bundle metadata
@@ -189,8 +196,10 @@ if [ -n "$fresh" ]; then
   git reset --hard ${quoteShell(snapshot.head)}
   ${applyCheckoutChanges(dir)}
 else
-  git reset --mixed ${quoteShell(snapshot.head)}
+  git reset --keep ${quoteShell(snapshot.head)} 2>/dev/null || git reset --hard ${quoteShell(snapshot.head)}
 fi
+git update-ref ${PROJECT_BASE_REF} ${quoteShell(snapshot.head)}
+rm -f ../repository.bundle
 ${snapshot.origin ? `git remote set-url origin ${quoteShell(snapshot.origin)}` : "git remote remove origin"}`;
 }
 
@@ -201,18 +210,22 @@ done < ${quoteShell(join(dir, "replaced-paths"))}
 tar -xf ${quoteShell(join(dir, "changes.tar"))}`;
 }
 
-/** The task is new and idle. Replacing its checkout preserves deletions as well as edits. */
+/**
+ * The task is new and idle: its worktree is the Mac's HEAD plus what the engine seeded
+ * from the main checkout (dependencies, env files). Apply the Mac's uncommitted edits
+ * and deletions on top, and keep the seed, which is what makes a project image fast.
+ * The project's own hooks run afterwards and separately: their failure is not this one's.
+ */
 export function initializeWorktreeCommand(
 	dir: string,
 	worktree: string,
-	snapshot: Pick<RepositorySnapshot, "head" | "initializer">,
+	snapshot: Pick<RepositorySnapshot, "head">,
 ): string {
 	return `set -eu
 cd ${quoteShell(worktree)}
 test -f .git
-find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf -- {} +
 git reset --hard ${quoteShell(snapshot.head)}
-${applyCheckoutChanges(dir)}${snapshot.initializer ? `\n${snapshot.initializer}` : ""}`;
+${applyCheckoutChanges(dir)}`;
 }
 
 export async function transferSnapshot(
@@ -236,7 +249,7 @@ export async function transferSnapshot(
 				"-o",
 				"ServerAliveCountMax=3",
 				snapshot.archive,
-				snapshot.bundle,
+				...(snapshot.bundle ? [snapshot.bundle] : []),
 				snapshot.replacedPaths,
 				`${alias}:${directory}/`,
 			],

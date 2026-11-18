@@ -100,6 +100,9 @@ export const HOST_CH = {
 	cubicleCancel: "host:cubicleCancel",
 	cubicleOpenBrowser: "host:cubicleOpenBrowser",
 	cubicleDisconnect: "host:cubicleDisconnect",
+	/** The project image lifecycle: its state, and saving the environment Box as the image. */
+	cubicleProjectStatus: "host:cubicleProjectStatus",
+	cubicleProjectSave: "host:cubicleProjectSave",
 	/** Which wake providers have a key saved on this Mac (see AteamHost.wakeStatus). */
 	wakeStatus: "host:wakeStatus",
 	/** Check and save, or clear, one wake provider's key (encrypted). */
@@ -160,21 +163,54 @@ export interface CubicleStatus {
 
 /** A fresh box, full local checkout and initialized worktree for one task. */
 export const NEW_CUBICLE_SANDBOX = "__cubicle_sandbox__";
+/** The project's environment Box: where an agent prepares the project image. */
+export const CUBICLE_ENVIRONMENT = "__cubicle_environment__";
+/** The environment Box's name, and the one task in it that holds the setup chat. */
+export const CUBICLE_ENVIRONMENT_BOX = /^ateam-env-[a-z0-9-]+-[0-9a-f]{8}$/;
+export const CUBICLE_ENVIRONMENT_TASK = "Project environment";
+export function isCubicleEnvironmentAlias(alias: string | null | undefined): boolean {
+	return alias != null && /^cb-[a-z0-9-]+-ateam-env-[a-z0-9-]+-[0-9a-f]{8}$/.test(alias);
+}
+
 export interface CubicleTaskInput {
 	/** Correlates setup progress with the task submission that started it. */
 	requestId?: string;
-	/** Retry an unfinished sandbox by its Cubicle box name. */
-	resumeBox?: string;
+	/**
+	 * "task" (the default): a new Box for one worktree, from the project image when there
+	 * is one. "environment": open the project's environment Box, creating it when needed.
+	 */
+	kind?: "task" | "environment";
 	projectId: string;
 	name: string;
 	agentId: string;
 	nameAuto?: boolean;
+	/** Environment only: what the person wants set up, added to Ateam's own brief. */
+	prompt?: string;
 	issue?: { number: number; description: string };
 }
 export interface CubicleTaskResult {
 	alias: string;
 	project: ProjectDTO;
 	task: TaskDTO;
+	/** False when the environment's task already existed: open it, start nothing. */
+	created: boolean;
+	/** Environment only: the brief to launch the agent with. */
+	prompt?: string;
+	/** Setup finished, but something the task can live without did not (a failed hook). */
+	warning?: string;
+}
+
+/** Where a project stands in the Cubicle lifecycle, read from Cubicle each time. */
+export interface CubicleProjectStatus {
+	/** False when Cubicle is not connected: nothing else is known. */
+	available: boolean;
+	/** The image new task Boxes start from. */
+	image?: { head: string; createdAt: string };
+	/** The Box the image is prepared in. It is stopped while nobody works in it. */
+	environment?: { box: string; alias: string; state: string };
+	activity?: { kind: "setup" | "saving"; detail: string };
+	/** Why the last setup or save did not finish. */
+	error?: string;
 }
 
 /** A Cubicle box (or organization) name: it lands in SSH config and CLI arguments. */
@@ -431,6 +467,10 @@ export interface AteamHost {
 	cubicleOpenBrowser(): Promise<void>;
 	/** Deletes the stored key on this Mac; revoking happens in the Cubicle Dashboard. */
 	cubicleDisconnect(): Promise<CubicleStatus>;
+	/** `projectId` is the project on this Mac. */
+	cubicleProjectStatus(projectId: string): Promise<CubicleProjectStatus>;
+	/** Stops the environment Box and saves its disk as the project image. */
+	cubicleProjectSave(projectId: string): Promise<CubicleProjectStatus>;
 	/** Which wake providers have a key saved on this Mac. */
 	wakeStatus(): Promise<WakeStatus>;
 	/** Check `values` with the provider and save them (encrypted), or clear them

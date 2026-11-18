@@ -1,7 +1,11 @@
 import type { AgentDTO } from "@ateam/protocol";
 import { ArrowUp, Paperclip, Plus, X, Zap } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
-import { NEW_CUBICLE_SANDBOX } from "../../../shared/host";
+import {
+	CUBICLE_ENVIRONMENT,
+	type CubicleProjectStatus,
+	NEW_CUBICLE_SANDBOX,
+} from "../../../shared/host";
 import { titleFromPrompt } from "../titleFromPrompt";
 import { AgentPicker } from "./AgentPicker";
 import { EnvironmentPicker, type EnvOption } from "./EnvironmentPicker";
@@ -55,6 +59,7 @@ export function PromptComposer({
 	header,
 	project,
 	environments = [],
+	sandboxProjectId,
 	envAgents,
 	onInstallAgent,
 	onClose,
@@ -85,6 +90,8 @@ export function PromptComposer({
 	 *  A box is disabled when the repo can't run there.
 	 *  Unused by the session variant, which has no environment to choose. */
 	environments?: EnvOption[];
+	/** The selected project on this Mac, whose Cubicle project image a sandbox starts from. */
+	sandboxProjectId?: string;
 	/** Agent ids each connected engine actually has, keyed by alias ("local" for this
 	 *  Mac). Lets the agent picker offer only what the chosen environment can run. */
 	envAgents: Record<string, string[]>;
@@ -96,7 +103,6 @@ export function PromptComposer({
 		/** Nobody typed the name: it is the prompt's first words, so the model's
 		 *  title may replace it once, shortly after launch. */
 		nameAuto: boolean;
-		resumeBox?: string;
 		prompt: string;
 		agentId: string;
 		yolo: boolean;
@@ -109,7 +115,6 @@ export function PromptComposer({
 	}) => void;
 }) {
 	const [name, setName] = useState(initialName);
-	const [resumeBox, setResumeBox] = useState("");
 	const [prompt, setPrompt] = useState(initialPrompt);
 	const session = variant === "session";
 	// The agent last picked for a new task is remembered across tasks (and app
@@ -296,8 +301,24 @@ export function PromptComposer({
 			yolo,
 			files,
 			alias,
-			resumeBox: alias === NEW_CUBICLE_SANDBOX ? resumeBox.trim() || undefined : undefined,
 			open: session || open,
+		});
+	};
+
+	// The project's environment Box: an agent prepares it in a chat, and its saved disk
+	// is the image every sandbox of this project starts from. What is typed here goes to
+	// that agent as extra instructions.
+	const openEnvironment = () => {
+		if (pending !== 0) return;
+		onCreate({
+			name: "",
+			nameAuto: false,
+			prompt: prompt.trim(),
+			agentId,
+			yolo,
+			files,
+			alias: CUBICLE_ENVIRONMENT,
+			open: true,
 		});
 	};
 
@@ -338,17 +359,8 @@ export function PromptComposer({
 					value={prompt}
 					onChange={(e) => setPrompt(e.target.value)}
 				/>
-				{!session && alias === NEW_CUBICLE_SANDBOX && (
-					<details className="px-4 pb-2 text-xs text-muted-foreground">
-						<summary>Resume an unfinished sandbox</summary>
-						<input
-							className="mt-2 w-full rounded border px-2 py-1"
-							aria-label="Cubicle box to resume"
-							placeholder="Box name from the failed setup (optional)"
-							value={resumeBox}
-							onChange={(e) => setResumeBox(e.target.value)}
-						/>
-					</details>
+				{!session && alias === NEW_CUBICLE_SANDBOX && sandboxProjectId && (
+					<CubicleProjectLine projectId={sandboxProjectId} onEnvironment={openEnvironment} />
 				)}
 				{files.length > 0 && (
 					<div className="comp-files">
@@ -433,6 +445,87 @@ export function PromptComposer({
 					</button>
 				</div>
 			</div>
+		</div>
+	);
+}
+
+/** "3 days ago", for when the project image was saved. */
+function ago(iso: string): string {
+	const minutes = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60_000));
+	if (minutes < 60) return minutes <= 1 ? "just now" : `${minutes} minutes ago`;
+	const hours = Math.round(minutes / 60);
+	if (hours < 48) return hours === 1 ? "an hour ago" : `${hours} hours ago`;
+	return `${Math.round(hours / 24)} days ago`;
+}
+
+/**
+ * Where the project stands in the Cubicle lifecycle, under the prompt of a new
+ * sandbox task: which image the sandbox starts from, and the way into the project's
+ * environment, where that image is made.
+ */
+function CubicleProjectLine({
+	projectId,
+	onEnvironment,
+}: {
+	projectId: string;
+	onEnvironment: () => void;
+}) {
+	const [status, setStatus] = useState<CubicleProjectStatus | null>(null);
+	const [failed, setFailed] = useState(false);
+	useEffect(() => {
+		let live = true;
+		setStatus(null);
+		setFailed(false);
+		window.ateamHost.cubicleProjectStatus(projectId).then(
+			(next) => {
+				if (live) setStatus(next);
+			},
+			() => {
+				if (live) setFailed(true);
+			},
+		);
+		return () => {
+			live = false;
+		};
+	}, [projectId]);
+
+	let text: string;
+	let action: string | null = null;
+	if (failed) text = "Could not read this project's Cubicle image.";
+	else if (!status) text = "Checking the project image…";
+	else if (!status.available) text = "Connect Cubicle in Settings → Boxes to run sandboxes.";
+	else if (status.activity)
+		text =
+			status.activity.kind === "saving"
+				? `Saving the project image: ${status.activity.detail}`
+				: `The project environment is being prepared: ${status.activity.detail}`;
+	else if (status.image) {
+		text = `Starts from the project image saved ${ago(status.image.createdAt)} at ${status.image.head.slice(0, 7)}.`;
+		action = "Update environment";
+	} else if (status.environment) {
+		text =
+			"The project environment has no saved image yet. This sandbox sets the project up itself.";
+		action = "Open environment";
+	} else {
+		text = "No project image yet. This sandbox sets the project up itself, which is slower.";
+		action = "Set up project environment";
+	}
+	return (
+		<div className="comp-cubicle-project" aria-live="polite">
+			<span>
+				{text}
+				{status?.error && !status.activity ? ` Last attempt: ${status.error}` : ""}
+			</span>
+			{action && (
+				<button
+					type="button"
+					className="comp-cubicle-action"
+					title="An agent prepares the project in its own Box. Its saved disk is the image every new sandbox starts from. What you typed above is added to its instructions."
+					onClick={onEnvironment}
+				>
+					{action}
+				</button>
+			)}
 		</div>
 	);
 }

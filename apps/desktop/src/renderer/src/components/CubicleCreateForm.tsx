@@ -184,9 +184,11 @@ export function CubicleCreateForm({
 					)}
 					{!image &&
 						cubicle.boxCreateAllowed &&
-						!cubicle.permissions?.includes("boxes:snapshot") && (
+						!["boxes:snapshot", "boxes:delete"].every((permission) =>
+							cubicle.permissions?.includes(permission),
+						) && (
 							<CubicleButton onClick={() => void act(() => window.ateamHost.cubicleConnect())}>
-								Enable reusable image
+								Enable images and cleanup
 							</CubicleButton>
 						)}
 					{cubicle.permissions && (
@@ -277,8 +279,8 @@ export function CubicleCreateForm({
 			)}
 			{cubicle && (
 				<div className="cb-hint">
-					{staging ? "Staging" : "Cubicle"} · {apiHost} · the private tunnel needs{" "}
-					<code>cubicle tunnel install</code> once
+					{staging ? "Staging" : "Cubicle"} · {apiHost} · Ateam sets up the private network and asks
+					for your Mac password once
 				</div>
 			)}
 		</div>
