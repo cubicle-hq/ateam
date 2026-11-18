@@ -24,7 +24,7 @@
 import { app, dialog, shell } from "electron";
 import { APP_NAME } from "./app-name";
 
-const DOWNLOAD_URL = "https://github.com/clawnify/ateam/releases/latest/download/Ateam-macos.dmg";
+const DOWNLOAD_URL = "https://github.com/cubicle-hq/ateam/releases/latest/download/Ateam-macos.dmg";
 
 type Phase = "load" | "startup";
 

@@ -96,7 +96,7 @@ ssh -t mybox.boxd claude          # preinstalled; log in, then exit
 By hand instead, the same install Ateam runs:
 
 ```bash
-ssh mybox.boxd 'curl -fsSL https://raw.githubusercontent.com/clawnify/ateam/main/packages/server/scripts/install.sh | bash -s -- --service'
+ssh mybox.boxd 'curl -fsSL https://raw.githubusercontent.com/cubicle-hq/ateam/main/packages/server/scripts/install.sh | bash -s -- --service'
 ```
 
 ## Connect
@@ -116,7 +116,7 @@ the page shows, on an iPhone signed in to the same Tailscale account. The
 terminal, the same thing:
 
 ```bash
-ssh mybox.boxd 'curl -fsSL https://raw.githubusercontent.com/clawnify/ateam/main/packages/server/scripts/install.sh | bash -s -- --tailscale'
+ssh mybox.boxd 'curl -fsSL https://raw.githubusercontent.com/cubicle-hq/ateam/main/packages/server/scripts/install.sh | bash -s -- --tailscale'
 ```
 
 It prints the link to approve the box with, and waits up to 15 minutes for you. With

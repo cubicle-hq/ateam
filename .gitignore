@@ -11,3 +11,12 @@ release/
 .env.local
 coverage/
 *.tsbuildinfo
+__pycache__/
+
+# Keep portable sandbox setup while ignoring local worktree state.
+!.ateam/
+.ateam/*
+!.ateam/sandbox.json
+
+# Ateam generates Codex notification hooks for each developer locally.
+/.codex/hooks.json

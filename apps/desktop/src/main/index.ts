@@ -8,6 +8,7 @@ import { windowBackground } from "../shared/theme";
 import { WINDOW_CH } from "../shared/window";
 import { APP_NAME } from "./app-name";
 import { startCrossBox } from "./cross-box";
+import { guardCubiclePreviewBrowser } from "./cubicle-preview-browser";
 import { createHost, registerHostIpc } from "./host";
 import { registerIpc } from "./ipc";
 import { type Lead, startLead } from "./lead";
@@ -209,6 +210,7 @@ function createWindow(projectId?: string): BrowserWindow {
 			preload: join(__dirname, "../preload/index.js"),
 			sandbox: false,
 			contextIsolation: true,
+			webviewTag: true,
 		},
 	});
 	windowProject.set(win, projectId ?? null);
@@ -216,6 +218,7 @@ function createWindow(projectId?: string): BrowserWindow {
 	// Native full screen hides the traffic lights; maximized windows keep them.
 	win.on("enter-full-screen", () => win.webContents.send(WINDOW_CH.evtFullScreen, true));
 	win.on("leave-full-screen", () => win.webContents.send(WINDOW_CH.evtFullScreen, false));
+	guardCubiclePreviewBrowser(win.webContents);
 
 	// Pin the project by stamping the renderer URL; the preload reads it back via
 	// window.boundProjectId(). A hash keeps loadFile working (no querystring file).
@@ -330,6 +333,7 @@ app
 			openProjectWindow,
 			editorUrl: host.editorUrl,
 			browserUrl: host.browserUrl,
+			installBoxDesktop: host.installBoxDesktop,
 		});
 		registerHostIpc(host);
 		// The boxes reaching each other, when the user turns it on (cross-box.ts).

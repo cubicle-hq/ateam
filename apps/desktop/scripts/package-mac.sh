@@ -5,6 +5,8 @@
 # The staging dir is recreated on demand, so it survives `/tmp` being cleared.
 # Usage:  bash scripts/package-mac.sh
 # Output: $STAGE/release/{Ateam-macos.dmg, Ateam-<ver>-arm64-mac.zip, latest-mac.yml}
+# ATEAM_LOCAL_BUILD=1 builds an ad-hoc signed .app for local installation.
+# ATEAM_CUBICLE_CLI_BUNDLE can point to a complete, unpacked macOS CLI bundle.
 set -euo pipefail
 
 DESKTOP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -112,10 +114,28 @@ fi
 rm -rf "$STAGE/out" "$STAGE/build" "$STAGE/scripts" "$STAGE/electron-builder.yml" "$STAGE/release"
 cp -R "$DESKTOP_DIR/out" "$DESKTOP_DIR/build" "$DESKTOP_DIR/scripts" "$STAGE/"
 cp "$DESKTOP_DIR/electron-builder.yml" "$STAGE/"
+if [ -n "${ATEAM_CUBICLE_CLI_BUNDLE:-}" ]; then
+  test -x "$ATEAM_CUBICLE_CLI_BUNDLE/bin/cubicle"
+  test -x "$ATEAM_CUBICLE_CLI_BUNDLE/.tools/node/bin/node"
+  rm -rf "$STAGE/cubicle-cli"
+  ditto "$ATEAM_CUBICLE_CLI_BUNDLE" "$STAGE/cubicle-cli"
+  cat >> "$STAGE/electron-builder.yml" <<'YAML'
+extraResources:
+  - from: cubicle-cli
+    to: cubicle-cli
+YAML
+fi
 
 # 5. Sign + notarize + staple + dmg + zip (no target args: the yml declares both).
-echo "==> electron-builder (sign + notarize + dmg + zip)"
-( cd "$STAGE" && ./node_modules/.bin/electron-builder --mac --arm64 )
+if [ "${ATEAM_LOCAL_BUILD:-}" = 1 ]; then
+  echo "==> electron-builder (local arm64 app)"
+  ( cd "$STAGE" && SKIP_NOTARIZE=1 CSC_IDENTITY_AUTO_DISCOVERY=false ./node_modules/.bin/electron-builder \
+    --mac dir --arm64 --publish never \
+    --config.electronDist=node_modules/electron/dist )
+else
+  echo "==> electron-builder (sign + notarize + dmg + zip)"
+  ( cd "$STAGE" && ./node_modules/.bin/electron-builder --mac --arm64 )
+fi
 
 # 5a. Hard gate: every module the bundle require()s must exist in the .app.
 #     electron-builder prunes devDependencies and can drop a package entirely,
@@ -137,6 +157,30 @@ if ! assert_arm64_nodes "$STAGE/release/mac-arm64/Ateam.app"; then
   exit 1
 fi
 echo "   ok: all *.node in Ateam.app are arm64"
+
+if [ "${ATEAM_LOCAL_BUILD:-}" = 1 ]; then
+  ( cd "$STAGE" && node --input-type=commonjs - <<'JS'
+const { resolve } = require("node:path");
+const { signAsync } = require("@electron/osx-sign");
+signAsync({
+  app: resolve("release/mac-arm64/Ateam.app"),
+  identity: "-",
+  identityValidation: false,
+  preAutoEntitlements: false,
+  optionsForFile: () => ({
+    entitlements: resolve("build/entitlements.mac.plist"),
+    hardenedRuntime: true,
+    timestamp: "none",
+  }),
+}).catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+JS
+  )
+  codesign --verify --deep --strict "$STAGE/release/mac-arm64/Ateam.app"
+  exit 0
+fi
 
 echo "==> Gatekeeper check"
 spctl -a -vv -t install "$STAGE/release/mac-arm64/Ateam.app" 2>&1 | tail -2

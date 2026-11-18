@@ -220,8 +220,8 @@ export function ProjectTitle({
 }
 
 /**
- * The New task and New loop dialogs' Project pill, shown while the board holds
- * every project: which repo the new work lands in. Picking another re-points
+ * The New task and New loop dialogs' Project pill chooses which repo the
+ * new work lands in. Picking another re-points
  * the dialog's machines at that repo; what was typed stays.
  */
 export function ProjectPicker({

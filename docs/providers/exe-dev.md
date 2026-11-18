@@ -110,7 +110,7 @@ ssh -t mybox.exe.xyz claude          # preinstalled; log in, then exit
 By hand instead, the same install Ateam runs:
 
 ```bash
-ssh mybox.exe.xyz 'curl -fsSL https://raw.githubusercontent.com/clawnify/ateam/main/packages/server/scripts/install.sh | bash -s -- --service'
+ssh mybox.exe.xyz 'curl -fsSL https://raw.githubusercontent.com/cubicle-hq/ateam/main/packages/server/scripts/install.sh | bash -s -- --service'
 ```
 
 `systemd` is the init here, so `--service` gives the engine a systemd unit and it
@@ -134,7 +134,7 @@ account. The [recipe](README.md) has the rest: no Tailscale account yet, and key
 From a terminal, the same thing:
 
 ```bash
-ssh mybox.exe.xyz 'curl -fsSL https://raw.githubusercontent.com/clawnify/ateam/main/packages/server/scripts/install.sh | bash -s -- --tailscale'
+ssh mybox.exe.xyz 'curl -fsSL https://raw.githubusercontent.com/cubicle-hq/ateam/main/packages/server/scripts/install.sh | bash -s -- --tailscale'
 ```
 
 It waits up to 15 minutes for the approval. An approval that comes later still puts the VM

@@ -20,6 +20,24 @@ export interface ProviderSecrets {
 	/** This Mac's device token for each locked box it is paired with, by alias
 	 *  (pairing, protocol v29). */
 	boxTokens?: Record<string, string>;
+	/** Connect Cubicle: Ateam's own key for one organization (see cubicle.ts). */
+	cubicle?: CubicleCredential;
+}
+
+export interface CubicleCredential {
+	/** The API the key belongs to; a key from another API is ignored. */
+	api: string;
+	/** Absent once Cubicle said it was revoked or expired (the connection is kept for display). */
+	token?: string;
+	expiresAt: string;
+	connection: {
+		id: string;
+		applicationId: string;
+		org: { id: string; name: string };
+		permissions: string[];
+	};
+	/** Why the person must connect again. */
+	reconnect?: string;
 }
 
 /**
@@ -136,7 +154,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** Poll until `ssh ateam@<box>` succeeds — i.e. cloud-init made the user and sshd is up. */
 export async function waitForSsh(alias: string, tries = 36, everyMs = 5000): Promise<void> {
 	for (let i = 0; i < tries; i++) {
-		const r = await sshExec(alias, "true");
+		const r = await sshExec(alias, "true", { sshFlags: ["-o", "ConnectTimeout=15"] });
 		if (r.code === 0) return;
 		await sleep(everyMs);
 	}

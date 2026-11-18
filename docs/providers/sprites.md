@@ -152,7 +152,7 @@ once (`ssh -t mybox.sprite claude`) as on any other box.
 By hand instead, the same install Ateam runs:
 
 ```bash
-ssh mybox.sprite 'curl -fsSL https://raw.githubusercontent.com/clawnify/ateam/main/packages/server/scripts/install.sh | bash -s -- --service'
+ssh mybox.sprite 'curl -fsSL https://raw.githubusercontent.com/cubicle-hq/ateam/main/packages/server/scripts/install.sh | bash -s -- --service'
 ```
 
 ### The engine's service
@@ -188,7 +188,7 @@ the page shows, on an iPhone signed in to the same Tailscale account. The
 terminal, the same thing:
 
 ```bash
-ssh mybox.sprite 'curl -fsSL https://raw.githubusercontent.com/clawnify/ateam/main/packages/server/scripts/install.sh | bash -s -- --tailscale'
+ssh mybox.sprite 'curl -fsSL https://raw.githubusercontent.com/cubicle-hq/ateam/main/packages/server/scripts/install.sh | bash -s -- --tailscale'
 ```
 
 It prints the link to approve the Sprite with, waits up to 15 minutes for you, and ends

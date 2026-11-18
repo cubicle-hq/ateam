@@ -2,9 +2,11 @@ import { ChevronRight } from "lucide-react";
 import { useState } from "react";
 import { boxesNeedingYou, engineLabel } from "../boxes-settings";
 import { addTailscaleBox, installBox } from "../lib/box-actions";
+import { isCubicleAlias } from "../lib/project-boxes";
 import { useSetups } from "../lib/setups";
 import { BoxPage, BoxSetupPage, statusLine, useBoxActions, useBoxes } from "./BoxPage";
 import { CrossBox } from "./CrossBox";
+import { CubicleLogo } from "./CubicleLogo";
 import { DotfilesDefault } from "./Dotfiles";
 import { EnvironmentPicker } from "./EnvironmentPicker";
 import { PhonePairingPage } from "./PhonePairing";
@@ -117,9 +119,7 @@ export function BoxesSettings({ title, intro }: { title: string; intro?: string 
 		);
 	}
 
-	// The same ways to add a box as New task's Run on picker: create one on Hetzner, set one
-	// up over SSH, or connect one on the tailnet (with a code if it's locked). The picker
-	// keeps its place in the tree from no boxes to the first, or it would lose its state.
+	// Keep the add picker mounted as the first Box connects so it keeps its state.
 	return (
 		<>
 			{heading}
@@ -171,6 +171,11 @@ export function BoxesSettings({ title, intro }: { title: string; intro?: string 
 								<button type="button" className="box-row" onClick={() => setPage(row.alias)}>
 									<span className="box-card-text">
 										<span className="box-card-title">
+											{isCubicleAlias(row.alias) ? (
+												<span className="mr-1.5 inline-flex align-text-bottom">
+													<CubicleLogo />
+												</span>
+											) : null}
 											{row.title}
 											{actions.leadBox === row.alias ? (
 												<span className="box-card-tag">Lead</span>

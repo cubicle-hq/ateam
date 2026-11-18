@@ -64,7 +64,7 @@ describe("buildCloudInit", () => {
 		const argv = JSON.parse(last.replace(/^ {2}- /, "")) as string[];
 		expect(argv.slice(0, 4)).toEqual(["runuser", "-l", "ateam", "-c"]);
 		expect(argv[4]).toBe(
-			"set -o pipefail; curl -fsSL https://raw.githubusercontent.com/clawnify/ateam/main/packages/server/scripts/install.sh | " +
+			"set -o pipefail; curl -fsSL https://raw.githubusercontent.com/cubicle-hq/ateam/main/packages/server/scripts/install.sh | " +
 				`ATEAM_PAIR_DEVICE=${HASH} ATEAM_PAIR_LABEL=iPhone bash -s -- --service --tailscale --browser >~/ateam-install.log 2>&1`,
 		);
 	});

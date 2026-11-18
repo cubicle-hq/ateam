@@ -119,7 +119,7 @@ every Codex task on that box, so its card follows the agent's turns.
 One command, run **on the box as your non-root user**:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/clawnify/ateam/main/packages/server/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/cubicle-hq/ateam/main/packages/server/scripts/install.sh | bash
 ```
 
 It downloads the server bundle from the latest release, installs the two native
@@ -329,7 +329,7 @@ to keep something listening.
 
 ```bash
 export ATEAM_WS_ADDR=100.x.y.z:8787     # the box's OWN Tailscale IP
-curl -fsSL https://raw.githubusercontent.com/clawnify/ateam/main/packages/server/scripts/install.sh | bash -s -- --service
+curl -fsSL https://raw.githubusercontent.com/cubicle-hq/ateam/main/packages/server/scripts/install.sh | bash -s -- --service
 ```
 
 That writes a `systemd --user` unit carrying `ATEAM_WS_ADDR`, enables lingering so it

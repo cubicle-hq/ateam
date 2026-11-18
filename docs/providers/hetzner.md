@@ -101,7 +101,7 @@ account can.
 ## Install the engine
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/clawnify/ateam/main/packages/server/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/cubicle-hq/ateam/main/packages/server/scripts/install.sh | bash
 ```
 
 Add `-s -- --service` to install a systemd unit — required for the iOS app, which
@@ -133,7 +133,7 @@ it (with `TS_AUTHKEY=<key>` it needs no browser), or set the address yourself:
 
 ```bash
 export ATEAM_WS_ADDR=100.x.y.z:8787    # the box's OWN Tailscale IP
-curl -fsSL https://raw.githubusercontent.com/clawnify/ateam/main/packages/server/scripts/install.sh | bash -s -- --service
+curl -fsSL https://raw.githubusercontent.com/cubicle-hq/ateam/main/packages/server/scripts/install.sh | bash -s -- --service
 ```
 
 ## Gotchas

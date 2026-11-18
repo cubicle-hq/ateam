@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install the `ateam` server on a Linux box, straight from a GitHub Release:
 #
-#   curl -fsSL https://raw.githubusercontent.com/clawnify/ateam/main/packages/server/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/cubicle-hq/ateam/main/packages/server/scripts/install.sh | bash
 #
 # Run it AS THE USER that will own the agents (not root) — everything lands under
 # that user's home. The optional browser/tailnet setup needs sudo. Re-running upgrades
@@ -51,7 +51,7 @@
 # nothing suitable, nvm + node 22 are installed into the user's home.
 set -euo pipefail
 
-REPO="clawnify/ateam"
+REPO="cubicle-hq/ateam"
 APP_DIR="$HOME/ateam-app"
 BIN_DIR="$HOME/.local/bin"
 WANT_SERVICE=0

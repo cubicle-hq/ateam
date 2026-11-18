@@ -22,12 +22,13 @@ import {
 import { type KeyboardEvent, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "@/lib/utils";
-import type { HostStatus, WakeStatus } from "../../../shared/host";
+import { type HostStatus, NEW_CUBICLE_SANDBOX, type WakeStatus } from "../../../shared/host";
 import { startSetup, useSetups } from "../lib/setups";
 import { sshDestination } from "../lib/ssh-destination";
 import { BoxPageDialog } from "./BoxPage";
 import { ConnectSteps } from "./ConnectSteps";
 import { CreateBoxDialog } from "./CreateBoxDialog";
+import { CubicleLogo } from "./CubicleLogo";
 import { PickerHeading, PickerRow, pickerTrigger } from "./picker";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -58,7 +59,9 @@ const errorText = (e: unknown) =>
 export type EnvOption = {
 	alias: string | null;
 	label: string;
+	cubicle?: boolean;
 	disabled: boolean;
+	disabledReason?: string;
 	transport?: "ssh" | "ws";
 	/** In ~/.ssh/config but never connected — so almost certainly has no engine yet. */
 	needsSetup?: boolean;
@@ -153,11 +156,12 @@ export function EnvironmentPicker({
 	// since closing that page (or this popover) leaves the set-up running.
 	const setups = useSetups();
 	const pendingSetups = setups.filter(
-		(s) => s.state !== "done" && !environments.some((e) => e.alias === s.dest),
+		(s) => onInstall && s.state !== "done" && !environments.some((e) => e.alias === s.dest),
 	);
 
 	const isRemote = value !== null;
-	const label = environments.find((e) => e.alias === value)?.label ?? "Local";
+	const selected = environments.find((e) => e.alias === value);
+	const label = selected?.label ?? "Local";
 
 	const close = () => {
 		setOpen(false);
@@ -350,7 +354,9 @@ export function EnvironmentPicker({
 							className={pickerTrigger}
 							title="Run on — which machine runs this task"
 						>
-							{isRemote ? (
+							{selected?.cubicle || value === NEW_CUBICLE_SANDBOX ? (
+								<CubicleLogo size={14} />
+							) : isRemote ? (
 								<Server className="size-3.5" strokeWidth={1.75} />
 							) : (
 								<Laptop className="size-3.5" strokeWidth={1.75} />
@@ -426,7 +432,15 @@ export function EnvironmentPicker({
 										disabled={env.disabled}
 										onClick={() => pick(env)}
 										selected={active}
-										icon={env.alias === null ? <Laptop /> : <Server />}
+										icon={
+											env.alias === null ? (
+												<Laptop />
+											) : env.cubicle || env.alias === NEW_CUBICLE_SANDBOX ? (
+												<CubicleLogo />
+											) : (
+												<Server />
+											)
+										}
 										title={env.label}
 										tone={
 											env.error
@@ -437,6 +451,10 @@ export function EnvironmentPicker({
 										}
 										subTitle={
 											env.error ??
+											(env.disabled ? env.disabledReason : undefined) ??
+											(env.alias === NEW_CUBICLE_SANDBOX
+												? "A fresh box per task. Copies your local repository and runs its initializer before starting the agent."
+												: undefined) ??
 											skewTitle ??
 											(env.needsYou
 												? "This box's engine is behind this app's release, or its GitHub token is close to expiring or was refused. Settings → Boxes shows which, and the fix."
@@ -452,8 +470,8 @@ export function EnvironmentPicker({
 													env.skew < PROTOCOL_VERSION
 													? `update available (v${env.skew})`
 													: `update this app (box is v${env.skew})`
-												: env.disabled && env.alias !== null
-													? "repo needs a git remote to run here"
+												: env.disabled
+													? env.disabledReason
 													: env.needsYou
 														? "needs you, see Settings"
 														: env.asleep
@@ -508,7 +526,7 @@ export function EnvironmentPicker({
 											<Moon className="size-[13px]" strokeWidth={2} />
 										</Button>
 									)}
-									{env.alias !== null && onForget && (
+									{env.alias !== null && env.alias !== NEW_CUBICLE_SANDBOX && onForget && (
 										<Button
 											variant="ghost"
 											size="icon-xs"
@@ -557,7 +575,7 @@ export function EnvironmentPicker({
 									<PickerRow
 										icon={<Cloud />}
 										title="Create a new box"
-										sub="Spin up a VPS on Hetzner"
+										sub="Create on Cubicle or Hetzner"
 										onClick={() => {
 											setCreating(true);
 											close();

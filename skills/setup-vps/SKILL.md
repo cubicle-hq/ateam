@@ -75,7 +75,7 @@ they are then choosing to leave SSH exposed to the internet, and key-only auth
 As the non-root user, on the box:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/clawnify/ateam/main/packages/server/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/cubicle-hq/ateam/main/packages/server/scripts/install.sh | bash
 ```
 
 The installer handles Node (installing Node 22 via nvm if the box has none or one too
@@ -168,7 +168,7 @@ requires the service:
 
 ```bash
 export ATEAM_WS_ADDR=<box-tailnet-ip>:8787
-curl -fsSL https://raw.githubusercontent.com/clawnify/ateam/main/packages/server/scripts/install.sh | bash -s -- --service
+curl -fsSL https://raw.githubusercontent.com/cubicle-hq/ateam/main/packages/server/scripts/install.sh | bash -s -- --service
 ```
 
 The unit carries `ATEAM_WS_ADDR`. A wildcard bind is refused and the daemon exits —

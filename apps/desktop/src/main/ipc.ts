@@ -99,6 +99,7 @@ export interface NativeHandlers {
 	editorUrl: (taskId: string) => Promise<{ url: string } | { needsInstall: true }>;
 	/** Resolve a task's box browser URL, for the same reason as editorUrl. */
 	browserUrl: (taskId: string) => Promise<{ url: string }>;
+	installBoxDesktop: (taskId: string) => Promise<void>;
 }
 
 /**
@@ -151,6 +152,8 @@ export function registerIpc(router: Router, native: NativeHandlers): void {
 					return router.handle(method, [{ ...rest, files: [...kept, ...sent.paths] }]);
 				},
 			);
+		} else if (method === CH.browserInstall) {
+			ipcMain.handle(method, (_e, taskId: string) => native.installBoxDesktop(taskId));
 		} else {
 			ipcMain.handle(method, (_e, ...args: unknown[]) => router.handle(method, args));
 		}
@@ -277,14 +280,14 @@ export function registerIpc(router: Router, native: NativeHandlers): void {
 	// but with no Remote-SSH equivalent: VS Code can attach to a box over ssh,
 	// Chrome cannot, and raising THIS Mac's browser for a task whose work happens
 	// on a box would show the wrong machine's pages. That case says so instead: a
-	// box has its own Chrome (install-browser.sh), shown in the Browser panel.
+	// box has its own Chrome (install-browser.sh), shown in the Box desktop.
 	ipcMain.handle(
 		CH.utilOpenBrowser,
 		async (_e, alias: string | null): Promise<OpenBrowserResult> => {
 			if (alias !== null) {
 				return {
 					ok: false,
-					reason: `"${alias}" runs this task on a box, and a box needs its own browser — this Mac's Chrome would show the wrong machine's pages. Open the box's own browser in the Browser panel.`,
+					reason: `Open Box desktop to use Chrome on "${alias}".`,
 				};
 			}
 			const app = findChrome();

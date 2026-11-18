@@ -1,0 +1,4 @@
+{
+	"initializer": "bash scripts/init.sh",
+	"start": ""
+}

@@ -7,6 +7,7 @@
 // listener — handshakes (gating the protocol version), and ADDS it: connecting
 // never drops the others.
 
+import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { getAgent } from "@ateam/agents";
@@ -88,8 +89,9 @@ import {
 	sshClientTransport,
 	sshExec,
 } from "@ateam/server";
-import { app, ipcMain, shell } from "electron";
+import { app, ipcMain, shell, type WebContents } from "electron";
 import WebSocket from "ws";
+import boxDesktopInstaller from "../../../../packages/server/scripts/install-browser.sh?raw";
 import {
 	type BoxReadiness,
 	type BoxUpdateResult,
@@ -97,11 +99,15 @@ import {
 	type ConnectProgressEvent,
 	type CreateBoxSpec,
 	type CreateProgressEvent,
+	type CubicleStatus,
+	type CubicleTaskInput,
+	type CubicleTaskResult,
 	type GrammarJudgeIssue,
 	HOST_CH,
 	type HostStatus,
 	type InstallAgentResult,
 	type InstallLogEvent,
+	NEW_CUBICLE_SANDBOX,
 	type PhonePairing,
 	type PhonePairingBox,
 	type ProviderOptions,
@@ -109,6 +115,7 @@ import {
 	TAILSCALE_LOGIN_URL,
 	type WakeStatus,
 } from "../shared/host";
+import cubicleWallpaper from "./assets/cubicle-wallpaper.jpg?inline";
 import {
 	type Backend,
 	type BackendEvent,
@@ -125,6 +132,13 @@ import {
 } from "./box-setup";
 import { boxForwardFlags, browserLocalPort, editorLocalPort } from "./box-tunnel";
 import { pairLinkOf, phonePairLinkOf } from "./cross-box-plan";
+import { CUBICLE_TASK_SCOPE, type Cubicle, createCubicle } from "./cubicle";
+import { configureCubicleAgent, loadCubicleAgentAuth } from "./cubicle-agent";
+import { createCubicleImageCache } from "./cubicle-gold";
+import { cubicleListenersCommand, parseCubicleListeners } from "./cubicle-preview";
+import { closeCubiclePreviewBrowser, openCubiclePreviewBrowser } from "./cubicle-preview-browser";
+import { provisionCubicleTask } from "./cubicle-task";
+import { quoteShell } from "./cubicle-workspace";
 import { offlineBackend } from "./offline";
 
 // The one pre-quoted remote command (ssh space-joins remote args, so `bash -lc`
@@ -211,8 +225,12 @@ export interface Host {
 	/** Resolve the URL THIS client loads for a box task's browser (noVNC, signed
 	 *  in), over the ssh forward or the tailnet endpoint. */
 	browserUrl(taskId: string): Promise<{ url: string }>;
+	installBoxDesktop(taskId: string): Promise<void>;
 	/** Connect the box if needed, then clone+register a repo ON it (from its remote URL). */
 	provision(alias: string, input: { cloneUrl: string }): Promise<ProjectDTO>;
+	createCubicleTask(input: CubicleTaskInput): Promise<CubicleTaskResult>;
+	listCubiclePorts(taskId: string): Promise<number[]>;
+	openCubiclePreview(owner: WebContents, taskId: string, port: number): Promise<{ url: string }>;
 	/** Install the ateam engine on a reachable SSH box (idempotent), streaming the
 	 *  installer's output, then connect. `dest` is an ssh_config alias or user@host. */
 	install(dest: string, opts?: { wsAddr?: string; tailscale?: boolean }): Promise<HostStatus>;
@@ -249,6 +267,9 @@ export interface Host {
 	saveSecrets(patch: { hetznerToken?: string; tailscaleAuthKey?: string }): SecretsStatus;
 	/** The provider's real regions + sizes for the given token (or the saved one). */
 	providerOptions(token?: string): Promise<ProviderOptions>;
+	/** Connect Cubicle: Ateam's own key for one Cubicle organization. */
+	readonly cubicle: Cubicle;
+	cubicleStatus(retryImage?: boolean): Promise<CubicleStatus>;
 	/** Which wake providers have a key saved on this Mac. */
 	wakeStatus(): WakeStatus;
 	/** Check a wake provider's key and save it (encrypted), or clear it with null. */
@@ -292,6 +313,17 @@ export interface HostDeps {
 export function createHost({ localEngine, broadcast }: HostDeps): Host {
 	const db = localEngine.services.db;
 	const local = localBackend(localEngine);
+	const sourceLinksPath = join(app.getPath("userData"), "cubicle-project-sources.json");
+	const sourceLinks = new Map<string, string>();
+	try {
+		const saved = JSON.parse(readFileSync(sourceLinksPath, "utf8"));
+		for (const [projectId, sourceId] of Object.entries(saved)) {
+			if (typeof sourceId === "string") sourceLinks.set(projectId, sourceId);
+		}
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+			console.warn("[ateam] Couldn't read Cubicle project links:", error);
+	}
 
 	// alias → backend; `null` is the always-held local engine (insertion order: local
 	// first). Boxes are added on connect and removed on disconnect.
@@ -574,6 +606,7 @@ export function createHost({ localEngine, broadcast }: HostDeps): Host {
 
 		// Resolve once: the same answer decides which wire to open AND what we save.
 		const wire = resolveTransport(db, alias);
+		if (opts.wake && wire !== "ws") await cubicle.wakeBox(alias);
 		const reached = await reach(alias, wire, opts);
 		const { client, rpc, info } = reached;
 		// Another connect to this box got there first while this one was on the
@@ -1029,6 +1062,26 @@ export function createHost({ localEngine, broadcast }: HostDeps): Host {
 		dest: string,
 		opts?: { wsAddr?: string; tailscale?: boolean; rerun?: boolean; browser?: boolean },
 	): Promise<HostStatus> {
+		// Already set up and held — installing again would just re-run the (idempotent)
+		// script for no reason; hand back its status.
+		const existing = backends.get(dest);
+		if (existing && !opts?.rerun) return statusOf(existing, dest);
+
+		await installEngine(dest, opts);
+		// We just reached the box over SSH, so its transport is ssh — seed that row so
+		// connect() resolves it even when `dest` is a user@host with no ssh_config entry.
+		recordConnection(db, { hostAlias: dest, transport: "ssh" });
+		// A box held through a rerun had its engine restarted under it, and the reconnect
+		// that set off may hold the engine the service has since replaced: take a fresh
+		// handshake, so what it reports (its network port) is the new engine's.
+		if (opts?.rerun && backends.has(dest)) release(dest);
+		return connect(dest, true);
+	}
+
+	async function installEngine(
+		dest: string,
+		opts?: { wsAddr?: string; tailscale?: boolean; browser?: boolean },
+	) {
 		// `dest` reaches ssh as an argument, where a leading "-" would make it an option,
 		// and one with a space in it (a pasted `ssh mybox`) names no host ssh can reach.
 		if (dest.startsWith("-") || /\s/.test(dest)) {
@@ -1036,11 +1089,6 @@ export function createHost({ localEngine, broadcast }: HostDeps): Host {
 				`"${dest}" isn't one box: give its name in your ssh config, or user@host, on its own.`,
 			);
 		}
-		// Already set up and held — installing again would just re-run the (idempotent)
-		// script for no reason; hand back its status.
-		const existing = backends.get(dest);
-		if (existing && !opts?.rerun) return statusOf(existing, dest);
-
 		const wsAddr = opts?.wsAddr?.trim();
 		// A caller-supplied address is interpolated into a remote shell command, so it
 		// must be EXACTLY a host:port endpoint — never anything that could break the pipe.
@@ -1105,21 +1153,59 @@ export function createHost({ localEngine, broadcast }: HostDeps): Host {
 					: `Setup of "${dest}" failed: ssh exited ${result.code ?? "on a signal"}.`,
 			);
 		}
-
-		// We just reached the box over SSH, so its transport is ssh — seed that row so
-		// connect() resolves it even when `dest` is a user@host with no ssh_config entry.
-		recordConnection(db, { hostAlias: dest, transport: "ssh" });
-		// A box held through a rerun had its engine restarted under it, and the reconnect
-		// that set off may hold the engine the service has since replaced: take a fresh
-		// handshake, so what it reports (its network port) is the new engine's.
-		if (opts?.rerun && backends.has(dest)) release(dest);
-		return connect(dest, true);
 	}
 
 	// The encrypted provider-credentials store, created lazily (needs app to be ready).
 	let secretsStore: ReturnType<typeof createSecretStore> | null = null;
 	const secrets = () =>
 		(secretsStore ??= createSecretStore(join(app.getPath("userData"), "provider-secrets.enc")));
+	const cubicle = createCubicle({
+		load: () => secrets().load(),
+		save: (patch) => void secrets().save(patch),
+		openExternal: (url) => shell.openExternal(url),
+		onConnected: () => void cubicleStatus().catch(() => {}),
+		get userData() {
+			return app.getPath("userData");
+		},
+	});
+
+	// Rendered from the Cubicle Dashboard login background at the Box display size.
+	const installWallpaper = `(
+set -eu
+tmp=$(mktemp)
+trap 'rm -f -- "$tmp"' EXIT
+printf '%s' ${quoteShell(cubicleWallpaper.slice(cubicleWallpaper.indexOf(",") + 1))} | base64 -d > "$tmp"
+sudo -n install -D -m 644 "$tmp" /usr/local/share/ateam/cubicle-wallpaper.jpg
+)`;
+	const cubicleImages = createCubicleImageCache({
+		cubicle,
+		runtimeVersion: app.getVersion(),
+		installWallpaper,
+		installEngine,
+		remote: async (alias, command) => {
+			let tail = "";
+			const result = await sshExec(alias, `timeout 1200 bash -lc ${quoteShell(command)}`, {
+				sshFlags: ["-o", "ConnectTimeout=20"],
+				onData: (chunk) => {
+					tail = (tail + chunk).slice(-1600);
+				},
+			});
+			if (result.code !== 0) throw new Error(tail.trim() || `Image setup exited ${result.code}.`);
+		},
+	});
+
+	async function cubicleStatus(retryImage = false): Promise<CubicleStatus> {
+		const status = await cubicle.status();
+		if (
+			status.state === "connected" &&
+			status.boxCreateAllowed === true &&
+			CUBICLE_TASK_SCOPE.every((permission) => status.permissions?.includes(permission))
+		) {
+			void cubicleImages.prepare(retryImage);
+			return { ...status, image: cubicleImages.status() };
+		}
+		return status;
+	}
 
 	/** This Mac's device token for a locked box, by alias. */
 	const boxToken = (alias: string): string | undefined => secrets().load().boxTokens?.[alias];
@@ -1285,6 +1371,24 @@ export function createHost({ localEngine, broadcast }: HostDeps): Host {
 	}
 
 	async function createBox(spec: CreateBoxSpec): Promise<HostStatus> {
+		if (spec.provider === "cubicle") {
+			const progress = (stage: string) =>
+				broadcast(HOST_CH.evtCreateProgress, {
+					alias: spec.name,
+					stage,
+				} satisfies CreateProgressEvent);
+			const scope = spec.resume ? undefined : (await cubicle.status()).permissions;
+			const image = scope?.includes("boxes:snapshot") ? await cubicleImages.prepare() : undefined;
+			const alias = await cubicle.provision(spec, progress, image);
+			progress(image ? "Connecting to your Box" : "Installing Ateam and connecting your box");
+			try {
+				return image ? await connect(alias) : await install(alias);
+			} catch (error) {
+				throw new Error(
+					`${error instanceof Error ? error.message : String(error)} Box retained. Choose Resume setup with the same name.`,
+				);
+			}
+		}
 		const alias = sanitizeName(spec.name);
 		const saved = secrets().load();
 		const token = (spec.hetznerToken || saved.hetznerToken || "").trim();
@@ -1530,6 +1634,70 @@ export function createHost({ localEngine, broadcast }: HostDeps): Host {
 		return (await heldBox(alias).handle(CH.githubAccessCheck, [repos ?? null])) as RepoAccessDTO[];
 	}
 
+	async function createCubicleTask(input: CubicleTaskInput): Promise<CubicleTaskResult> {
+		const agentAuth = input.agentId === "opencode" ? await loadCubicleAgentAuth() : undefined;
+		const result = await provisionCubicleTask(input, {
+			local,
+			aggregate: agg,
+			cubicle,
+			baseImage: cubicleImages.prepare,
+			connect,
+			configureAgent: async (alias) => {
+				if (agentAuth) await configureCubicleAgent(alias, agentAuth);
+			},
+			install,
+			installAgent,
+			heldBox,
+			progress: (step, stage) =>
+				broadcast(HOST_CH.evtCreateProgress, {
+					alias: NEW_CUBICLE_SANDBOX,
+					stage,
+					cubicleSetup: { requestId: input.requestId, step },
+				} satisfies CreateProgressEvent),
+			onLog: (dest, chunk) =>
+				broadcast(HOST_CH.evtInstallLog, { dest, chunk } satisfies InstallLogEvent),
+		});
+		sourceLinks.set(result.project.id, input.projectId);
+		try {
+			const pendingPath = `${sourceLinksPath}.tmp`;
+			writeFileSync(pendingPath, JSON.stringify(Object.fromEntries(sourceLinks)), { mode: 0o600 });
+			renameSync(pendingPath, sourceLinksPath);
+		} catch (error) {
+			console.warn("[ateam] Couldn't save Cubicle project links:", error);
+		}
+		return result;
+	}
+
+	async function cubicleListeners(taskId: string) {
+		const owner = agg.ownerOf.get(taskId);
+		const alias = [...backends].find(([, backend]) => backend === owner)?.[0];
+		if (!alias || !/^cb-[a-z0-9-]+$/.test(alias) || endpointUrl(alias))
+			throw new Error("Connect to this task's Cubicle Box first.");
+		let output = "";
+		const result = await sshExec(alias, `timeout 8 sh -c ${quoteShell(cubicleListenersCommand)}`, {
+			sshFlags: ["-o", "ConnectTimeout=5"],
+			onData: (chunk) => {
+				output += chunk;
+			},
+		});
+		if (result.code !== 0) throw new Error("Could not check listening ports on this Box.");
+		return { alias, listeners: parseCubicleListeners(output) };
+	}
+
+	async function listCubiclePorts(taskId: string): Promise<number[]> {
+		const { listeners } = await cubicleListeners(taskId);
+		return [...listeners.keys()].sort((a, b) => a - b);
+	}
+
+	async function openCubiclePreview(owner: WebContents, taskId: string, port: number) {
+		if (!Number.isInteger(port) || port < 1 || port > 65535)
+			throw new Error("Enter a port from 1 to 65535.");
+		const { alias, listeners } = await cubicleListeners(taskId);
+		const address = listeners.get(port);
+		if (!address) throw new Error(`Port ${port} is no longer available for preview on this Box.`);
+		return openCubiclePreviewBrowser(owner, alias, address, port);
+	}
+
 	async function provision(alias: string, input: { cloneUrl: string }): Promise<ProjectDTO> {
 		// Provisioning targets a SPECIFIC engine — the aggregate routes by learned id,
 		// but there's no id on the box yet, so call that backend's clone directly.
@@ -1542,12 +1710,18 @@ export function createHost({ localEngine, broadcast }: HostDeps): Host {
 
 	const router: Router = {
 		methods: local.methods,
-		handle: (method, args, ctx) =>
-			method === CH.settingsGet || method === CH.settingsUpdate
-				? settingsCall(method, args)
-				: method === CH.credentialsGet || method === CH.credentialsUpdate
-					? credentialsCall(method, args)
-					: agg.handle(method, args, ctx),
+		async handle(method, args, ctx) {
+			if (method === CH.settingsGet || method === CH.settingsUpdate)
+				return settingsCall(method, args);
+			if (method === CH.credentialsGet || method === CH.credentialsUpdate)
+				return credentialsCall(method, args);
+			const result = await agg.handle(method, args, ctx);
+			if (method !== CH.projectsList || sourceLinks.size === 0) return result;
+			return (result as ProjectDTO[]).map((project) => {
+				const sourceProjectId = sourceLinks.get(project.id);
+				return sourceProjectId ? { ...project, sourceProjectId } : project;
+			});
+		},
 		release: (client) => local.release?.(client),
 		handleFor: (ownerId, method, args) => agg.handleFor(ownerId, method, args),
 		ownerKind: (ownerId) => agg.ownerKindOf(ownerId),
@@ -1634,6 +1808,40 @@ export function createHost({ localEngine, broadcast }: HostDeps): Host {
 		return { url: `http://127.0.0.1:${editorLocalPort(alias)}` };
 	}
 
+	// Send the desktop build's installer so a fresh Cubicle Box gets the same
+	// display defaults even when its engine came from an older Ateam release.
+	const desktopInstalls = new Map<string, Promise<void>>();
+	async function installBoxDesktop(taskId: string): Promise<void> {
+		const owner = agg.ownerOf.get(taskId);
+		const alias = [...backends].find(([, backend]) => backend === owner)?.[0];
+		if (!alias || !/^cb-[a-z0-9-]+$/.test(alias) || endpointUrl(alias)) {
+			await agg.handle(CH.browserInstall, [taskId]);
+			return;
+		}
+		const pending = desktopInstalls.get(alias);
+		if (pending) return pending;
+		let output = "";
+		const script = `set -e
+${installWallpaper}
+export ATEAM_BOX_DESKTOP=1
+${boxDesktopInstaller}`;
+		const command = `timeout 1200 bash -lc ${quoteShell(script)}`;
+		const installing = sshExec(alias, command, {
+			sshFlags: ["-o", "ConnectTimeout=15"],
+			onData: (chunk) => {
+				output = (output + chunk).slice(-8000);
+				broadcast(HOST_CH.evtInstallLog, { dest: alias, chunk } satisfies InstallLogEvent);
+			},
+		})
+			.then(({ code }) => {
+				if (code !== 0)
+					throw new Error(installerFailure(output) ?? `Box desktop setup exited ${code}.`);
+			})
+			.finally(() => desktopInstalls.delete(alias));
+		desktopInstalls.set(alias, installing);
+		return installing;
+	}
+
 	async function browserUrl(taskId: string): Promise<{ url: string }> {
 		const backend = agg.ownerOf.get(taskId);
 		if (!backend || backend.kind === "local")
@@ -1665,9 +1873,15 @@ export function createHost({ localEngine, broadcast }: HostDeps): Host {
 		githubStatuses,
 		editorUrl,
 		browserUrl,
+		installBoxDesktop,
 		provision,
+		createCubicleTask,
+		listCubiclePorts,
+		openCubiclePreview,
 		install,
 		createBox,
+		cubicle,
+		cubicleStatus,
 		installAgent,
 		boxReadiness,
 		updateBox,
@@ -1724,12 +1938,32 @@ export function registerHostIpc(host: Host): void {
 	);
 	ipcMain.handle(HOST_CH.pairingLock, (_e, alias: string) => host.pairingLock(String(alias)));
 	ipcMain.handle(HOST_CH.phonePairing, () => host.phonePairing());
+	ipcMain.handle(HOST_CH.createCubicleTask, (_e, input: CubicleTaskInput) =>
+		host.createCubicleTask(input),
+	);
+	ipcMain.handle(HOST_CH.listCubiclePorts, (_e, taskId: string) => host.listCubiclePorts(taskId));
+	ipcMain.handle(HOST_CH.openCubiclePreview, (event, taskId: string, port: number) =>
+		host.openCubiclePreview(event.sender, taskId, port),
+	);
+	ipcMain.handle(HOST_CH.closeCubiclePreview, (event, url: string) =>
+		closeCubiclePreviewBrowser(event.sender, url),
+	);
 	ipcMain.handle(HOST_CH.provision, (_e, alias: string, input: { cloneUrl: string }) =>
 		host.provision(alias, input),
 	);
 	ipcMain.handle(HOST_CH.install, (_e, dest: string, opts?: { wsAddr?: string }) =>
 		host.install(dest, opts),
 	);
+	ipcMain.handle(HOST_CH.cubicleStatus, (_e, retryImage?: boolean) =>
+		host.cubicleStatus(retryImage === true),
+	);
+	ipcMain.handle(HOST_CH.cubicleConnect, async () => {
+		const status = await host.cubicle.connect(CUBICLE_TASK_SCOPE);
+		return status.state === "connected" ? host.cubicleStatus() : status;
+	});
+	ipcMain.handle(HOST_CH.cubicleCancel, () => host.cubicle.cancel());
+	ipcMain.handle(HOST_CH.cubicleOpenBrowser, () => host.cubicle.openBrowser());
+	ipcMain.handle(HOST_CH.cubicleDisconnect, () => host.cubicle.disconnect());
 	ipcMain.handle(HOST_CH.createBox, (_e, spec: CreateBoxSpec) => host.createBox(spec));
 	ipcMain.handle(HOST_CH.installAgent, (_e, alias: string, agentId: string) =>
 		host.installAgent(alias, agentId),

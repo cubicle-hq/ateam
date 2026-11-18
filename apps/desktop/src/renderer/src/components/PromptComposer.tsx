@@ -1,7 +1,7 @@
-import type { AgentDTO, BoxWake } from "@ateam/protocol";
+import type { AgentDTO } from "@ateam/protocol";
 import { ArrowUp, Paperclip, Plus, X, Zap } from "lucide-react";
-import { type ReactNode, useEffect, useRef, useState } from "react";
-import type { HostStatus } from "../../../shared/host";
+import { type ReactNode, useEffect, useState } from "react";
+import { NEW_CUBICLE_SANDBOX } from "../../../shared/host";
 import { titleFromPrompt } from "../titleFromPrompt";
 import { AgentPicker } from "./AgentPicker";
 import { EnvironmentPicker, type EnvOption } from "./EnvironmentPicker";
@@ -56,9 +56,6 @@ export function PromptComposer({
 	project,
 	environments = [],
 	envAgents,
-	onAdd,
-	onInstall,
-	onForget,
 	onInstallAgent,
 	onClose,
 	onCreate,
@@ -82,22 +79,15 @@ export function PromptComposer({
 	initialAlias?: string | null;
 	/** Shown above the form, e.g. who proposed this task and why. */
 	header?: ReactNode;
-	/** The Project pill, first in the foot, when the project is a choice here
-	 *  (the board shows every project). Picking one changes `environments`. */
+	/** The Project pill, first in the foot. Picking one changes `environments`. */
 	project?: ReactNode;
-	/** Where the task can run: this Mac + each ~/.ssh/config box. `alias` null = Local.
-	 *  A box is disabled when the repo can't run there (no GitHub identity to clone).
+	/** Where the selected project can run. `alias` null = Local.
+	 *  A box is disabled when the repo can't run there.
 	 *  Unused by the session variant, which has no environment to choose. */
 	environments?: EnvOption[];
 	/** Agent ids each connected engine actually has, keyed by alias ("local" for this
 	 *  Mac). Lets the agent picker offer only what the chosen environment can run. */
 	envAgents: Record<string, string[]>;
-	/** Connect a Tailscale endpoint typed into the picker, with the provider that wakes it. */
-	onAdd?: (endpoint: string, wake: BoxWake | null, code?: string) => Promise<void>;
-	/** Set up a fresh box over SSH (install engine + connect) from the picker. */
-	onInstall?: (dest: string, onLog: (chunk: string) => void) => Promise<HostStatus>;
-	/** Remove a box from the picker's list (disconnecting it first if connected). */
-	onForget?: (alias: string) => Promise<void>;
 	/** Install a coding agent's CLI on the selected environment; returns the login step. */
 	onInstallAgent?: (alias: string | null, agentId: string) => Promise<{ loginCommand?: string }>;
 	onClose: () => void;
@@ -106,6 +96,7 @@ export function PromptComposer({
 		/** Nobody typed the name: it is the prompt's first words, so the model's
 		 *  title may replace it once, shortly after launch. */
 		nameAuto: boolean;
+		resumeBox?: string;
 		prompt: string;
 		agentId: string;
 		yolo: boolean;
@@ -118,6 +109,7 @@ export function PromptComposer({
 	}) => void;
 }) {
 	const [name, setName] = useState(initialName);
+	const [resumeBox, setResumeBox] = useState("");
 	const [prompt, setPrompt] = useState(initialPrompt);
 	const session = variant === "session";
 	// The agent last picked for a new task is remembered across tasks (and app
@@ -128,6 +120,7 @@ export function PromptComposer({
 		if (saved && agents.some((a) => a.id === saved)) return saved;
 		return agents.find((a) => a.available)?.id ?? "claude";
 	});
+	const [sandboxAgent, setSandboxAgent] = useState("opencode");
 	const pickAgent = (id: string) => {
 		setPickedAgent(id);
 		if (!session) localStorage.setItem(AGENT_KEY, id);
@@ -171,7 +164,7 @@ export function PromptComposer({
 	// Remember the last-picked environment across tasks (and app restarts) so it isn't
 	// re-selected every time; fall back to the first runnable one (Local, unless the repo
 	// isn't here) when nothing valid is saved for this project. "__local__" = the Mac.
-	const [alias, setAliasState] = useState<string | null>(() => {
+	const [pickedAlias, setAliasState] = useState<string | null>(() => {
 		// A session runs where its task already is; only a new task gets a choice.
 		if (session) return sessionAlias ?? null;
 		if (
@@ -185,28 +178,16 @@ export function PromptComposer({
 			saved !== null && environments.some((e) => e.alias === savedAlias && !e.disabled);
 		return usable ? savedAlias : (environments.find((e) => !e.disabled)?.alias ?? null);
 	});
-	// A box set up from Run on is picked the moment it's connected, which can be before
-	// this list has it: that pick waits for the list rather than being moved away from.
-	const justPicked = useRef<string | null>(null);
 	const setAlias = (a: string | null) => {
-		justPicked.current = a;
 		setAliasState(a);
 		localStorage.setItem("ateam.runOn", a === null ? "__local__" : a);
 	};
-	// Another project picked in the Project pill can't run where this one could
-	// (no copy on this Mac, no remote to clone onto a box): move to the first
-	// place it can, without remembering it as a pick.
-	useEffect(() => {
-		if (session) return;
-		const entry = environments.find((e) => e.alias === alias);
-		if (entry && !entry.disabled) {
-			if (justPicked.current === alias) justPicked.current = null;
-			return;
-		}
-		if (!entry && alias !== null && justPicked.current === alias) return;
-		const first = environments.find((e) => !e.disabled);
-		if (first) setAliasState(first.alias);
-	}, [session, environments, alias]);
+
+	// Resolve the destination against the current project before rendering or submitting.
+	const destination =
+		environments.find((env) => env.alias === pickedAlias && !env.disabled) ??
+		environments.find((env) => !env.disabled);
+	const alias = session ? (sessionAlias ?? null) : (destination?.alias ?? null);
 
 	// Which agents the chosen environment actually has installed. Known only for a
 	// connected engine; when unknown, fall back to the catalog's own `available` flag.
@@ -218,15 +199,18 @@ export function PromptComposer({
 
 	// An environment without the picked agent runs the first one it has instead,
 	// without forgetting the pick: an environment that has it gets it back.
+	// New Cubicle images include OpenCode; keep the saved local choice for other environments.
+	const chosenAgent = alias === NEW_CUBICLE_SANDBOX ? sandboxAgent : pickedAgent;
 	const agentId =
-		availOnEnv && !availOnEnv.includes(pickedAgent)
-			? (agents.find((a) => availOnEnv.includes(a.id))?.id ?? pickedAgent)
-			: pickedAgent;
+		availOnEnv && !availOnEnv.includes(chosenAgent)
+			? (agents.find((a) => availOnEnv.includes(a.id))?.id ?? chosenAgent)
+			: chosenAgent;
 
 	// A session has no name to fall back on — it needs something to say.
 	// A file still being saved isn't in `files` yet: a quick ⌘⏎ would start the agent without it.
 	const canSubmit =
 		pending === 0 &&
+		(session || destination !== undefined) &&
 		Boolean(session ? prompt.trim() || files.length : name.trim() || prompt.trim() || files.length);
 
 	// De-duped append, preserving order — the picker and drops both feed here.
@@ -312,6 +296,7 @@ export function PromptComposer({
 			yolo,
 			files,
 			alias,
+			resumeBox: alias === NEW_CUBICLE_SANDBOX ? resumeBox.trim() || undefined : undefined,
 			open: session || open,
 		});
 	};
@@ -353,6 +338,18 @@ export function PromptComposer({
 					value={prompt}
 					onChange={(e) => setPrompt(e.target.value)}
 				/>
+				{!session && alias === NEW_CUBICLE_SANDBOX && (
+					<details className="px-4 pb-2 text-xs text-muted-foreground">
+						<summary>Resume an unfinished sandbox</summary>
+						<input
+							className="mt-2 w-full rounded border px-2 py-1"
+							aria-label="Cubicle box to resume"
+							placeholder="Box name from the failed setup (optional)"
+							value={resumeBox}
+							onChange={(e) => setResumeBox(e.target.value)}
+						/>
+					</details>
+				)}
 				{files.length > 0 && (
 					<div className="comp-files">
 						{files.map((f) => (
@@ -385,20 +382,13 @@ export function PromptComposer({
 					<AgentPicker
 						agents={agents}
 						value={agentId}
-						onChange={pickAgent}
+						onChange={alias === NEW_CUBICLE_SANDBOX ? setSandboxAgent : pickAgent}
 						isAvailable={isAvail}
 						alias={alias}
 						onInstallAgent={onInstallAgent}
 					/>
 					{!session && (
-						<EnvironmentPicker
-							environments={environments}
-							value={alias}
-							onChange={setAlias}
-							onAdd={onAdd}
-							onInstall={onInstall}
-							onForget={onForget}
-						/>
+						<EnvironmentPicker environments={environments} value={alias} onChange={setAlias} />
 					)}
 					<button
 						type="button"

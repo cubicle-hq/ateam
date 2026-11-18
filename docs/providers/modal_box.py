@@ -35,7 +35,7 @@ import time
 import modal
 
 APP_NAME = "ateam-boxes"
-INSTALL = "https://raw.githubusercontent.com/clawnify/ateam/main/packages/server/scripts/install.sh"
+INSTALL = "https://raw.githubusercontent.com/cubicle-hq/ateam/main/packages/server/scripts/install.sh"
 SSHD = ["/bin/sh", "-c", "mkdir -p /run/sshd && exec /usr/sbin/sshd -D -e"]
 # The minimum request, allowed to burst to 2 vCPU and 4 GiB: Modal bills the larger of what a sandbox
 # requests and what it uses, so a fixed 2 vCPU bills 2 vCPU all day. An idle box stays under this request on

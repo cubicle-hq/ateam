@@ -93,7 +93,7 @@ export type InstallableAgent = keyof typeof AGENT_INSTALLS;
 
 /** The installer every box runs, the one the docs tell people to curl. */
 export const INSTALL_SH_URL =
-	"https://raw.githubusercontent.com/clawnify/ateam/main/packages/server/scripts/install.sh";
+	"https://raw.githubusercontent.com/cubicle-hq/ateam/main/packages/server/scripts/install.sh";
 
 /**
  * Build the cloud-init that makes a fresh box reachable exactly the way the rest of

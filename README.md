@@ -8,12 +8,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/clawnify/ateam/releases/latest/download/Ateam-macos.dmg">
-    <img src="./assets/macos-badge.svg" alt="Download app for macOS" width="220" />
-  </a>
-  <a href="https://apps.apple.com/gb/app/ateam-go/id6790125600">
-    <img src="./assets/iphone-badge.svg" alt="Download app for iPhone" width="220" />
-  </a>
+  <a href="#develop">Build from source</a> ·
+  <a href="./docs/providers/cubicle.md">Cubicle setup</a> ·
+  <a href="https://github.com/cubicle-hq/ateam/releases">Fork releases</a>
 </p>
 
 <p align="center">
@@ -33,10 +30,11 @@ one conversation.
 
 Identity and all GitHub operations come from the `gh` CLI.
 
-> **Install:** grab the signed & notarized DMG above (or any release from the
-> [Releases](https://github.com/clawnify/ateam/releases) page), drag Ateam to
-> Applications, and open it — no Gatekeeper warnings. Or run from source (see
-> [Develop](#develop)).
+> **Cubicle fork:** this repository builds on [Clawnify's Ateam](https://github.com/clawnify/ateam)
+> with native Cubicle connections, a sandbox per task, and in-app desktop and port previews.
+> Start with [Develop](#develop) and the [Cubicle guide](./docs/providers/cubicle.md).
+> This fork has no packaged releases yet. Its installer and update feed use
+> `cubicle-hq/ateam`; remote installs need a fork release or an `ATEAM_TARBALL` build.
 
 ## Requirements
 
@@ -93,7 +91,7 @@ agents while your Mac stays a thin UI — over SSH on your Tailscale network, wi
 public ports. On the box:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/clawnify/ateam/main/packages/server/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/cubicle-hq/ateam/main/packages/server/scripts/install.sh | bash
 ```
 
 **No box yet?** Ateam can create one for you — pick a region and size, and it provisions
@@ -147,7 +145,7 @@ gh auth login                                     # device code — works over S
 
 curl -fsSL https://claude.ai/install.sh | bash    # then run `claude` once to log in
 
-curl -fsSL https://raw.githubusercontent.com/clawnify/ateam/main/packages/server/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/cubicle-hq/ateam/main/packages/server/scripts/install.sh | bash
 ```
 
 The installer ends with a readiness report — every line should be `[ok]`. Finally, on
@@ -159,7 +157,7 @@ over SSH, so install a service to keep one running:
 
 ```bash
 export ATEAM_WS_ADDR=100.x.y.z:8787               # the box's OWN Tailscale IP
-curl -fsSL https://raw.githubusercontent.com/clawnify/ateam/main/packages/server/scripts/install.sh | bash -s -- --service
+curl -fsSL https://raw.githubusercontent.com/cubicle-hq/ateam/main/packages/server/scripts/install.sh | bash -s -- --service
 ```
 
 </details>
@@ -188,7 +186,7 @@ Full walkthrough, from a freshly bought VPS to a connected board:
 whole setup with you:
 
 ```
-/plugin marketplace add clawnify/ateam
+/plugin marketplace add cubicle-hq/ateam
 /plugin install ateam@ateam
 ```
 
