@@ -35,7 +35,7 @@ trap 'rm -rf -- "$tmp"' EXIT
 chmod 755 "$tmp"
 curl -fsSL -o "$tmp/chrome.deb" https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-  xvfb openbox xfdesktop4 xfconf dbus-daemon x11vnc novnc websockify fonts-noto-color-emoji "$tmp/chrome.deb"`;
+  xvfb openbox xfdesktop4 xfce4-panel xfconf dbus-daemon x11vnc novnc websockify fonts-noto-color-emoji "$tmp/chrome.deb"`;
 
 interface ImageDependencies {
 	cubicle: Pick<

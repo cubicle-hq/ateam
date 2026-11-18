@@ -163,6 +163,7 @@ export function CubicleCreateForm({
 					{image?.state === "building" && (
 						<SetupStepper
 							title="Preparing the Ateam image"
+							cubicle
 							steps={Object.values(IMAGE_STEPS)}
 							active={Object.keys(IMAGE_STEPS).indexOf(image.step)}
 							detail={image.detail}

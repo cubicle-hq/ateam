@@ -1,4 +1,4 @@
-import { Check, ChevronDown, Globe, Monitor, RefreshCw } from "lucide-react";
+import { Check, ChevronDown, Globe, RefreshCw } from "lucide-react";
 import { useState } from "react";
 import { CubicleLogo } from "./CubicleLogo";
 import {
@@ -6,19 +6,16 @@ import {
 	DropdownMenuContent,
 	DropdownMenuItem,
 	DropdownMenuLabel,
-	DropdownMenuSeparator,
 	DropdownMenuTrigger,
 } from "./ui/dropdown-menu";
 
 export function CubicleBoxMenu({
 	taskId,
 	active,
-	onDesktop,
 	onPreview,
 }: {
 	taskId: string;
-	active: "desktop" | number | null;
-	onDesktop: () => void;
+	active: number | null;
 	onPreview: (port: number) => void;
 }) {
 	const [ports, setPorts] = useState<number[] | null>(null);
@@ -39,20 +36,14 @@ export function CubicleBoxMenu({
 				<button
 					type="button"
 					className={`iconbtn cubicle-box-menu${active !== null ? " active" : ""}`}
-					aria-label="Cubicle desktop and ports"
-					title="Cubicle desktop and ports"
+					aria-label="Cubicle app ports"
+					title="Cubicle app ports"
 				>
 					<CubicleLogo />
 					<ChevronDown size={12} aria-hidden="true" />
 				</button>
 			</DropdownMenuTrigger>
 			<DropdownMenuContent align="end" className="w-48">
-				<DropdownMenuItem onSelect={onDesktop}>
-					<Monitor />
-					Desktop
-					{active === "desktop" && <Check className="ml-auto" />}
-				</DropdownMenuItem>
-				<DropdownMenuSeparator />
 				<DropdownMenuLabel>Listening ports</DropdownMenuLabel>
 				{ports?.map((port) => (
 					<DropdownMenuItem key={port} onSelect={() => onPreview(port)}>
