@@ -1,5 +1,5 @@
 import type { DidFailLoadEvent, WebviewTag } from "electron";
-import { Globe, RefreshCw, X } from "lucide-react";
+import { Globe, RefreshCw } from "lucide-react";
 import { createElement, useCallback, useEffect, useState } from "react";
 import { IconButton } from "./IconButton";
 import { Button } from "./ui/button";
@@ -7,11 +7,12 @@ import { Button } from "./ui/button";
 export function CubiclePreviewPane({
 	taskId,
 	port,
-	onClose,
+	shown,
 }: {
 	taskId: string;
 	port: number;
-	onClose: () => void;
+	/** The pane stays mounted behind its tab, so the app keeps its state while hidden. */
+	shown: boolean;
 }) {
 	const [page, setPage] = useState<{ url: string } | null>(null);
 	const [error, setError] = useState<string | null>(null);
@@ -57,7 +58,7 @@ export function CubiclePreviewPane({
 	}, [webview, port]);
 
 	return (
-		<div className="editor-wrap flex-col">
+		<div className="editor-wrap flex-col" style={{ display: shown ? "flex" : "none" }}>
 			<div className="flex items-center gap-2 border-b border-border px-3 py-2 text-sm">
 				<Globe size={16} aria-hidden="true" />
 				<span className="mr-auto">Preview · Port {port}</span>
@@ -69,7 +70,6 @@ export function CubiclePreviewPane({
 						else retry();
 					}}
 				/>
-				<IconButton icon={X} label="Close preview" onClick={onClose} />
 			</div>
 			{page &&
 				createElement("webview", {

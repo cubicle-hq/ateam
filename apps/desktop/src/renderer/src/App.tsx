@@ -2938,6 +2938,7 @@ const CUBICLE_SETUP_LABELS: Record<CubicleSetupStep, string> = {
 };
 
 const BOX_DESKTOP_STEPS = ["Prepare Box desktop", "Load viewer"];
+const NO_PORTS: readonly number[] = [];
 
 // The status pill's colour per column: the columns that want your eyes take
 // the status colours, Backlog and Done stay neutral.
@@ -3619,6 +3620,11 @@ export function TaskPanel({
 	const [browserBusy, setBrowserBusy] = useState<"checking" | "installing" | "viewer" | null>(null);
 	const [preview, setPreview] = useState<{ taskId: string; port: number } | null>(null);
 	const previewPort = preview?.taskId === task.id ? preview.port : null;
+	// Every port opened on this task keeps a tab, and its preview stays loaded behind it.
+	const [portTabs, setPortTabs] = useState<{ taskId: string; ports: readonly number[] } | null>(
+		null,
+	);
+	const openPorts = portTabs?.taskId === task.id ? portTabs.ports : NO_PORTS;
 	const previewActive = useRef(false);
 	// The task on screen now. This panel is reused across tasks, not remounted,
 	// and a browser open can outlive a switch (an install takes minutes): its
@@ -3714,6 +3720,7 @@ export function TaskPanel({
 		setBrowserSrc(null);
 		setBrowserBusy(null);
 		setPreview(null);
+		setPortTabs(null);
 		previewActive.current = false;
 	}, [task.id]);
 
@@ -4017,6 +4024,24 @@ export function TaskPanel({
 	// beside it (both open at once). Only when the toggle wants it.
 	const mainViewOpen = editorOpen || browserOpen || changesOpen;
 	const desktopShown = browserOpen && previewPort === null;
+	const showPort = (port: number) => {
+		previewActive.current = true;
+		setPortTabs({
+			taskId: task.id,
+			ports: openPorts.includes(port) ? openPorts : [...openPorts, port],
+		});
+		setPreview({ taskId: task.id, port });
+		setBrowserOpen(true);
+		setEditorOpen(false);
+		setChangesOpen(false);
+	};
+	const closePort = (port: number) => {
+		setPortTabs({ taskId: task.id, ports: openPorts.filter((open) => open !== port) });
+		if (previewPort !== port) return;
+		previewActive.current = false;
+		setPreview(null);
+		setBrowserOpen(false);
+	};
 	const termDocked = termSide && mainViewOpen;
 
 	const page = side?.kind === "page" ? pageTabs.find((page) => page.id === side.id) : undefined;
@@ -4232,6 +4257,35 @@ export function TaskPanel({
 							</button>
 						</div>
 					)}
+					{openPorts.map((port) => {
+						const shown = browserOpen && previewPort === port;
+						return (
+							<div key={port} className={`sess-tab ${shown ? "active" : ""}`}>
+								<button
+									type="button"
+									role="tab"
+									className="sess-tab-name"
+									aria-selected={shown}
+									title={`The app on port ${port} of this Box`}
+									onClick={() => (shown ? setBrowserOpen(false) : showPort(port))}
+								>
+									<span className="sess-tab-icon">
+										<Globe size={14} />
+									</span>
+									<span>Port {port}</span>
+								</button>
+								<button
+									type="button"
+									className="sess-tab-close"
+									aria-label={`Close port ${port}`}
+									title={`Close port ${port}`}
+									onClick={() => closePort(port)}
+								>
+									<X size={14} />
+								</button>
+							</div>
+						);
+					})}
 					<Menu
 						icon={Plus}
 						label="New tab"
@@ -4344,13 +4398,7 @@ export function TaskPanel({
 						key={task.id}
 						taskId={task.id}
 						active={browserOpen ? previewPort : null}
-						onPreview={(port) => {
-							previewActive.current = true;
-							setPreview({ taskId: task.id, port });
-							setBrowserOpen(true);
-							setEditorOpen(false);
-							setChangesOpen(false);
-						}}
+						onPreview={showPort}
 					/>
 				)}
 				{alias === null && window.ateam.utils.openBrowser && (
@@ -4496,17 +4544,17 @@ export function TaskPanel({
 					</div>
 				)}
 
-				{browserOpen && previewPort !== null && (
+				{openPorts.map((port) => (
 					<CubiclePreviewPane
-						key={`${task.id}:${previewPort}`}
+						key={`${task.id}:${port}`}
 						taskId={task.id}
-						port={previewPort}
-						onClose={() => setBrowserOpen(false)}
+						port={port}
+						shown={browserOpen && previewPort === port}
 					/>
-				)}
+				))}
 
-				{previewPort === null && (browserSrc || browserBusy) && (
-					<div className="editor-wrap flex-col" style={{ display: browserOpen ? "flex" : "none" }}>
+				{(browserSrc || browserBusy) && (
+					<div className="editor-wrap flex-col" style={{ display: desktopShown ? "flex" : "none" }}>
 						{/* The Box desktop, streamed through noVNC. */}
 						<div className="box-desktop-viewer">
 							{browserSrc && (
