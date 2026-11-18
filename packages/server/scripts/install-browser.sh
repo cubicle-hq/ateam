@@ -66,6 +66,7 @@ if [ "${ATEAM_BOX_DESKTOP:-}" = 1 ] &&
 	DESKTOP_SURFACE=1
 	SERVICES="$SERVICES ateam-desktop-surface"
 fi
+PANEL_CONFIG="$HOME/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml"
 
 SPRITE_ENV="$(command -v sprite-env 2>/dev/null || true)"
 if [ -z "$SPRITE_ENV" ] && [ -x /.sprite/bin/sprite-env ]; then SPRITE_ENV=/.sprite/bin/sprite-env; fi
@@ -122,6 +123,8 @@ amd64) CHROME_DEB=google-chrome-stable_current_amd64.deb ;;
 *) die "Google Chrome ships for amd64 only, and this box is $(dpkg --print-architecture)" ;;
 esac
 PKGS="xvfb openbox x11vnc novnc xdotool scrot feh fonts-noto-color-emoji"
+# xfdesktop only paints the wallpaper and icons. The menu bar is the panel's.
+if [ -n "$DESKTOP_SURFACE" ]; then PKGS="$PKGS xfce4-panel"; fi
 if ! command -v google-chrome >/dev/null; then
 	TMP="$(mktemp -d)"
 	trap 'rm -rf "$TMP"' EXIT
@@ -180,7 +183,45 @@ chmod 700 "$BROWSER_DIR"
 if [ -f "$ENGINE_DIR/desktop-wallpaper.png" ]; then
 	cp "$ENGINE_DIR/desktop-wallpaper.png" "$BROWSER_DIR/wallpaper.png"
 fi
+DESKTOP_SURFACE_STALE=""
 if [ -n "$DESKTOP_SURFACE" ]; then
+	# One bar along the top: applications menu, open windows, clock. Xfce's stock
+	# layout adds a launcher dock for apps this box doesn't have. A layout the
+	# user already changed is theirs to keep.
+	if [ ! -f "$PANEL_CONFIG" ]; then
+		mkdir -p "$(dirname "$PANEL_CONFIG")"
+		cat >"$PANEL_CONFIG" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfce4-panel" version="1.0">
+  <property name="configver" type="int" value="2"/>
+  <property name="panels" type="array">
+    <value type="int" value="1"/>
+    <property name="panel-1" type="empty">
+      <property name="position" type="string" value="p=6;x=0;y=0"/>
+      <property name="length" type="uint" value="100"/>
+      <property name="position-locked" type="bool" value="true"/>
+      <property name="size" type="uint" value="28"/>
+      <property name="plugin-ids" type="array">
+        <value type="int" value="1"/>
+        <value type="int" value="2"/>
+        <value type="int" value="3"/>
+        <value type="int" value="4"/>
+      </property>
+    </property>
+  </property>
+  <property name="plugins" type="empty">
+    <property name="plugin-1" type="string" value="applicationsmenu"/>
+    <property name="plugin-2" type="string" value="tasklist"/>
+    <property name="plugin-3" type="string" value="separator">
+      <property name="expand" type="bool" value="true"/>
+      <property name="style" type="uint" value="0"/>
+    </property>
+    <property name="plugin-4" type="string" value="clock"/>
+  </property>
+</channel>
+EOF
+	fi
+	OLD_DESKTOP_LAUNCHER="$(cat "$DESKTOP_LAUNCHER" 2>/dev/null || true)"
 	cat >"$DESKTOP_LAUNCHER" <<'EOF'
 #!/bin/sh
 wallpaper=/usr/local/share/ateam/cubicle-wallpaper.jpg
@@ -192,9 +233,19 @@ if [ -r "$wallpaper" ] && command -v xfconf-query >/dev/null; then
 			xfconf-query -c xfce4-desktop -p "$property" -n -t string -s "$wallpaper" ;;
 	esac
 fi
+# The menu bar. It shares this D-Bus session, and ends with it when the service
+# restarts. Openbox keeps maximized windows (Chrome) below it.
+if [ -x /usr/bin/xfce4-panel ]; then
+	/usr/bin/xfce4-panel --disable-wm-check &
+fi
 exec /usr/bin/xfdesktop
 EOF
 	chmod +x "$DESKTOP_LAUNCHER"
+	# A running surface keeps the launcher it started with. It only draws the
+	# wallpaper, icons and bar, so restarting it never touches Chrome.
+	if [ -n "$OLD_DESKTOP_LAUNCHER" ] && [ "$OLD_DESKTOP_LAUNCHER" != "$(cat "$DESKTOP_LAUNCHER")" ]; then
+		DESKTOP_SURFACE_STALE=1
+	fi
 fi
 if [ ! -s "$VNC_PASS_FILE" ]; then
 	# VNC passwords stop at 8 characters, so more would only look stronger.
@@ -353,6 +404,7 @@ if [ "$SVC_MGR" = systemd ]; then
 	sudo systemctl enable --now $(printf '%s.service ' $SERVICES) >/dev/null 2>&1
 	if [ -n "$DESKTOP_CHANGED" ]; then sudo systemctl restart ateam-novnc.service; fi
 	if [ -n "${TW_UPGRADED:-}" ]; then sudo systemctl restart ateam-taskwindow.service; fi
+	if [ -n "$DESKTOP_SURFACE_STALE" ]; then sudo systemctl restart ateam-desktop-surface.service; fi
 else
 	# On a Sprite, deleting or restarting a service kills what it started, so a
 	# service already running this run's command is left exactly as it is. One
@@ -401,6 +453,7 @@ else
 		info "$name: created"
 	done < <(service_specs)
 	if [ -n "${TW_UPGRADED:-}" ]; then "$SPRITE_ENV" services restart ateam-taskwindow >/dev/null; fi
+	if [ -n "$DESKTOP_SURFACE_STALE" ]; then "$SPRITE_ENV" services restart ateam-desktop-surface >/dev/null; fi
 fi
 if [ -n "$DISPLAY_STALE" ]; then
 	info "The running Box desktop keeps its size until the display services restart."

@@ -1356,6 +1356,10 @@ input {
 	background: transparent;
 	color: var(--text-dim);
 }
+/* The Box desktop's tab has no close button, so it pads both sides alike. */
+.sess-tab.desktop-tab {
+	padding-right: 14px;
+}
 .sess-tab:hover {
 	color: var(--text);
 }
@@ -5690,25 +5694,33 @@ input {
 	background: var(--bg);
 }
 
+/* Square, like the rest of the chrome: a hairline card, no pill corners. */
 .setup-stepper {
 	width: min(100%, 340px);
-	padding: 16px 18px;
+	padding: 14px 16px;
 	border: 1px solid var(--border);
-	border-radius: 14px;
+	border-radius: 2px;
 	background: var(--bg-elev);
 	color: var(--text);
-	box-shadow: 0 12px 32px rgb(0 0 0 / 0.22);
+	box-shadow: 0 1px 2px rgb(0 0 0 / 0.12);
+}
+/* Cubicle work carries its copper along the top edge. */
+.setup-stepper.cubicle {
+	border-top: 2px solid #bc5f35;
 }
 
 .setup-stepper h2 {
+	display: flex;
+	align-items: center;
+	gap: 8px;
 	margin: 0 0 12px;
-	font-size: 14px;
+	font-size: 13px;
 	font-weight: 650;
 }
 
 .setup-stepper ol {
 	display: grid;
-	gap: 3px;
+	gap: 2px;
 	margin: 0;
 	padding: 0;
 	list-style: none;
@@ -5718,9 +5730,10 @@ input {
 	position: relative;
 	display: flex;
 	align-items: center;
-	gap: 9px;
+	gap: 8px;
 	padding: 4px 6px;
-	border-radius: 6px;
+	border-left: 2px solid transparent;
+	border-radius: 2px;
 	color: var(--text-dim);
 	font-size: 12px;
 }
@@ -5729,6 +5742,9 @@ input {
 	background: var(--bg-elev-2);
 	color: var(--text);
 	font-weight: 600;
+}
+.setup-stepper.cubicle li[data-state="active"] {
+	border-left-color: #bc5f35;
 }
 
 .setup-step-icon {
@@ -5740,10 +5756,9 @@ input {
 
 .setup-step-icon:empty::before {
 	content: "";
-	width: 6px;
-	height: 6px;
+	width: 5px;
+	height: 5px;
 	border: 1px solid var(--text-dim);
-	border-radius: 50%;
 }
 
 .setup-stepper li[data-state="done"] .setup-step-icon {
@@ -5753,6 +5768,9 @@ input {
 .setup-stepper li[data-state="active"] .setup-step-icon {
 	color: var(--blue);
 }
+.setup-stepper.cubicle li[data-state="active"] .setup-step-icon {
+	color: #bc5f35;
+}
 
 .setup-stepper output {
 	display: block;
@@ -5760,6 +5778,32 @@ input {
 	color: var(--text-dim);
 	font-size: 12px;
 	overflow-wrap: anywhere;
+}
+
+/* The Cubicle mark at work: its quarters light one after another, clockwise.
+   Still (and fully drawn) for anyone who asked for less motion. */
+@keyframes cubicle-quarter {
+	0%,
+	100% {
+		opacity: 0.25;
+	}
+	25% {
+		opacity: 1;
+	}
+}
+@media (prefers-reduced-motion: no-preference) {
+	.cubicle-logo-working path {
+		animation: cubicle-quarter 1.4s ease-in-out infinite;
+	}
+	.cubicle-logo-working path:nth-child(2) {
+		animation-delay: 0.35s;
+	}
+	.cubicle-logo-working path:nth-child(3) {
+		animation-delay: 0.7s;
+	}
+	.cubicle-logo-working path:nth-child(4) {
+		animation-delay: 1.05s;
+	}
 }
 
 @media (prefers-reduced-motion: no-preference) {

@@ -94,6 +94,7 @@ import { ChangesList, DiffStat } from "./components/Changes";
 import { CleanupDialog } from "./components/CleanupDialog";
 import { ConnectSteps } from "./components/ConnectSteps";
 import { CubicleBoxMenu } from "./components/CubicleBoxMenu";
+import { CubicleLogo } from "./components/CubicleLogo";
 import { CubiclePreviewPane } from "./components/CubiclePreviewPane";
 import { FileDiffView } from "./components/FileDiffView";
 import { GetStarted } from "./components/GetStarted";
@@ -2909,6 +2910,7 @@ export function App() {
 				<div className="sandbox-setup-toast">
 					<SetupStepper
 						title="Preparing Cubicle sandbox"
+						cubicle
 						steps={CUBICLE_SETUP_STEPS.map((step) => CUBICLE_SETUP_LABELS[step])}
 						active={CUBICLE_SETUP_STEPS.indexOf(sandboxSetup.step)}
 						detail={sandboxSetup.detail}
@@ -4014,6 +4016,7 @@ export function TaskPanel({
 	// Whether a view covers the terminal, and whether the terminal instead docks
 	// beside it (both open at once). Only when the toggle wants it.
 	const mainViewOpen = editorOpen || browserOpen || changesOpen;
+	const desktopShown = browserOpen && previewPort === null;
 	const termDocked = termSide && mainViewOpen;
 
 	const page = side?.kind === "page" ? pageTabs.find((page) => page.id === side.id) : undefined;
@@ -4207,6 +4210,28 @@ export function TaskPanel({
 							</button>
 						</div>
 					))}
+					{/* A box has a desktop of its own (noVNC): a tab like any other view of the task. */}
+					{alias !== null && (
+						<div className={`sess-tab desktop-tab ${desktopShown ? "active" : ""}`}>
+							<button
+								type="button"
+								role="tab"
+								className="sess-tab-name"
+								aria-selected={desktopShown}
+								title={desktopShown ? "Close Box desktop" : "Open Box desktop"}
+								onClick={() => (desktopShown ? setBrowserOpen(false) : openDesktop())}
+							>
+								<span className="sess-tab-icon">
+									{isCubicleBox ? (
+										<CubicleLogo size={14} animated={desktopShown && browserBusy !== null} />
+									) : (
+										<Monitor size={14} />
+									)}
+								</span>
+								<span>Desktop</span>
+							</button>
+						</div>
+					)}
 					<Menu
 						icon={Plus}
 						label="New tab"
@@ -4314,45 +4339,31 @@ export function TaskPanel({
 						}
 					/>
 				)}
-				{alias !== null ? (
-					isCubicleBox ? (
-						<CubicleBoxMenu
-							key={task.id}
-							taskId={task.id}
-							active={browserOpen ? (previewPort ?? "desktop") : null}
-							onDesktop={() => {
-								if (browserOpen && previewPort === null) setBrowserOpen(false);
-								else openDesktop();
-							}}
-							onPreview={(port) => {
-								previewActive.current = true;
-								setPreview({ taskId: task.id, port });
-								setBrowserOpen(true);
-								setEditorOpen(false);
-								setChangesOpen(false);
-							}}
-						/>
-					) : (
-						<IconButton
-							icon={Monitor}
-							active={browserOpen}
-							label={browserOpen ? "Close Box desktop" : "Open Box desktop"}
-							onClick={() => (browserOpen ? setBrowserOpen(false) : openDesktop())}
-						/>
-					)
-				) : (
-					window.ateam.utils.openBrowser && (
-						<IconButton
-							icon={Globe}
-							label="Open Chrome (the browser your agents drive)"
-							onClick={() =>
-								run(async () => {
-									const res = await window.ateam.utils.openBrowser?.(alias);
-									if (res && !res.ok) throw new Error(res.reason);
-								})
-							}
-						/>
-					)
+				{isCubicleBox && (
+					<CubicleBoxMenu
+						key={task.id}
+						taskId={task.id}
+						active={browserOpen ? previewPort : null}
+						onPreview={(port) => {
+							previewActive.current = true;
+							setPreview({ taskId: task.id, port });
+							setBrowserOpen(true);
+							setEditorOpen(false);
+							setChangesOpen(false);
+						}}
+					/>
+				)}
+				{alias === null && window.ateam.utils.openBrowser && (
+					<IconButton
+						icon={Globe}
+						label="Open Chrome (the browser your agents drive)"
+						onClick={() =>
+							run(async () => {
+								const res = await window.ateam.utils.openBrowser?.(alias);
+								if (res && !res.ok) throw new Error(res.reason);
+							})
+						}
+					/>
 				)}
 				<IconButton icon={GitCommitVertical} label="Commit all changes" onClick={commit} />
 				<IconButton
@@ -4512,6 +4523,7 @@ export function TaskPanel({
 								<div className="box-desktop-loading">
 									<SetupStepper
 										title="Opening Box desktop"
+										cubicle={isCubicleBox}
 										steps={BOX_DESKTOP_STEPS}
 										active={browserBusy === "viewer" ? 1 : 0}
 										detail={
